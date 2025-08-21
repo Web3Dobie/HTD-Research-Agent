@@ -1,0 +1,60 @@
+# Database (new)
+psycopg2-binary>=2.9.0
+python-dotenv>=1.0.0
+
+# Core framework (from original)
+matplotlib
+pandas
+pandas-ta
+requests
+schedule
+notion-client
+openai
+tweepy
+feedparser
+spacy
+finnhub-python
+openpyxl
+beautifulsoup4
+
+# Financial data
+yfinance
+tvscreener
+
+# Web and API
+fastapi
+uvicorn
+
+# Azure services
+azure-storage-blob
+azure-identity
+azure-keyvault-secrets
+
+# PDF generation
+fpdf2
+pdf2image
+Pillow
+
+# Web scraping extras
+lxml
+html5lib
+
+# Communication
+python-telegram-bot
+
+# Utilities
+requests-oauthlib
+python-dateutil
+pytz
+numpy
+scipy
+
+# IG Index API
+trading-ig>=0.0.18
+
+# Additional utilities
+setuptools
+cloudscraper
+munch
+
+aiohttp>=3.8.0

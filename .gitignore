@@ -1,0 +1,244 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# pdm
+.pdm.toml
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+# Local History for Visual Studio Code
+.history/
+
+# Built Visual Studio Code Extensions
+*.vsix
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# FastAPI specific
+.env
+.env.local
+.env.production
+.env.staging
+.env.development
+.env.test
+app.db
+test.db
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+postgresql_data/
+pgdata/
+postgres_data/
+db_data/
+
+# Alembic (database migrations)
+alembic/versions/__pycache__/
+
+# FastAPI logs
+uvicorn.log
+access.log
+error.log
+app.log
+
+# Docker volumes (if using Docker for PostgreSQL)
+postgres-data/
+pgadmin-data/
+docker-data/
+
+# Configuration files that might contain secrets
+database.ini
+db_config.py
+config/local.py
+config/production.py
+config/secrets.py
+secrets.json
+.secrets
+
+# Testing databases and coverage
+test_*.db
+test_database.db
+.coverage
+htmlcov/
+
+# Development tools
+.mypy_cache/
+
+# Dependency management files (keep requirements.txt but ignore locks)
+Pipfile.lock
+poetry.lock
+requirements-dev.txt.lock
+
+# Temporary files
+temp/
+tmp/
+uploads/
+downloads/
+static/uploads/
+media/uploads/
+
+# API documentation builds (if generating docs)
+docs/build/
+docs/_build/
+
+# Backup files
+*.bak
+*.backup
+backup/
+
+# IDE and editor files
+*.swp
+*.swo
+*~
+
+# Package manager files
+package-lock.json
+yarn.lock
