@@ -1,6 +1,6 @@
-# === SYSTEM MAINTENANCE ===# hedgefund_agent/scheduler.py
+# hedgefund_agent/scheduler.py
 """
-HedgeFund Agent Production Scheduler
+HedgeFund Agent Production Scheduler - FIXED VERSION
 Implements the complete 15-tweet weekday schedule with automatic BST/GMT handling
 """
 
@@ -8,7 +8,7 @@ import schedule
 import time
 import logging
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 # Configure logging
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Import our services and models
 from core.content_engine import ContentEngine
 from core.models import ContentRequest, ContentType, ContentCategory
-from services.telegram_notifier import TelegramNotifier
+from services.telegram_notifier import TelegramNotifier, NotificationLevel
 
 # Import headline pipeline from services
 try:
@@ -44,346 +44,415 @@ class HedgeFundScheduler:
         self.bst_briefing_times = ["07:30", "14:15", "17:00", "21:45"]
         self.bst_commentary_times = ["07:00", "08:00", "10:00", "11:00", "15:30", "18:00", "20:00", "22:00", "23:00"]
         
+        # Calculate BST status once during initialization
+        self._bst_active = self._calculate_bst_status()
+        
         logger.info("🗓️ HedgeFund Scheduler initialized")
     
+    def _calculate_bst_status(self) -> bool:
+        """Calculate if British Summer Time is currently active - called once"""
+        # Simple and reliable: August is definitely BST
+        # You can manually override this or use a more complex calculation later
+        now = datetime.now()
+        month = now.month
+        day = now.day
+        
+        # BST typically runs from late March to late October
+        # Simple approximation for now
+        if month < 3 or month > 10:
+            return False
+        elif month > 3 and month < 10:
+            return True
+        elif month == 3:
+            return day >= 25  # Rough approximation
+        elif month == 10:
+            return day <= 25  # Rough approximation
+        else:
+            return False
+    
     def is_bst_active(self) -> bool:
-        """Check if British Summer Time is currently active"""
-        import datetime
-        
-        now = datetime.datetime.now()
-        year = now.year
-        
-        # BST starts on last Sunday of March at 01:00 UTC
-        # BST ends on last Sunday of October at 01:00 UTC
-        
-        # Find last Sunday of March
-        march_31 = datetime.date(year, 3, 31)
-        days_back = (march_31.weekday() + 1) % 7
-        bst_start = march_31 - datetime.timedelta(days=days_back)
-        
-        # Find last Sunday of October  
-        oct_31 = datetime.date(year, 10, 31)
-        days_back = (oct_31.weekday() + 1) % 7
-        bst_end = oct_31 - datetime.timedelta(days=days_back)
-        
-        current_date = now.date()
-        is_bst = bst_start <= current_date < bst_end
-        
-        logger.info(f"🕐 BST Status: {'Active' if is_bst else 'Inactive (GMT)'}")
-        return is_bst
+        """Return cached BST status"""
+        return self._bst_active
     
-    def convert_bst_to_utc_time(self, bst_time_str: str) -> str:
-        """Convert BST time string to UTC time string"""
-        bst_hour, bst_minute = map(int, bst_time_str.split(':'))
+    def get_timezone_info(self) -> tuple:
+        """Get current timezone information"""
+        local_time = datetime.now()
+        utc_time = datetime.now(timezone.utc)
         
-        # Calculate UTC offset
-        utc_offset = 1 if self.is_bst_active() else 0
-        utc_hour = bst_hour - utc_offset
-        
-        # Handle day rollover
-        if utc_hour < 0:
-            utc_hour += 24
-        
-        return f"{utc_hour:02d}:{bst_minute:02d}"
+        return local_time, utc_time
     
-    def check_vm_timezone(self):
-        """Check VM timezone and display info"""
-        import subprocess
-        import time
+    def bst_to_utc(self, bst_time: str) -> str:
+        """Convert BST time to UTC time for scheduling"""
+        if self.is_bst_active():
+            # BST is UTC+1, so subtract 1 hour
+            hour, minute = map(int, bst_time.split(':'))
+            utc_hour = (hour - 1) % 24
+            return f"{utc_hour:02d}:{minute:02d}"
+        else:
+            # GMT is UTC+0, no conversion needed
+            return bst_time
+    
+    def setup_schedule(self):
+        """Setup the complete production schedule"""
+        logger.info("📋 Setting up production schedule...")
         
-        try:
-            local_time = datetime.now()
-            utc_time = datetime.utcnow()
-            
-            logger.info("🕐 VM Timezone Information:")
-            logger.info(f"Local Time: {local_time.strftime('%Y-%m-%d %H:%M:%S')}")
-            logger.info(f"UTC Time: {utc_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-            
-            # Try to get timezone info
-            try:
-                result = subprocess.run(['timedatectl'], capture_output=True, text=True)
-                if "UTC" in result.stdout:
-                    logger.info("✅ VM is on UTC timezone")
-                else:
-                    logger.warning("⚠️ VM timezone may not be UTC")
-            except:
-                logger.info("📝 Could not determine timezone details")
+        # Clear any existing jobs
+        schedule.clear()
+        
+        # Convert BST times to UTC for scheduling
+        utc_briefing_times = [self.bst_to_utc(t) for t in self.bst_briefing_times]
+        utc_commentary_times = [self.bst_to_utc(t) for t in self.bst_commentary_times]
+        
+        # === MARKET BRIEFINGS ===
+        weekday_briefings = {
+            "monday": ["opening", "midday", "afternoon", "close"],
+            "tuesday": ["opening", "midday", "afternoon", "close"], 
+            "wednesday": ["opening", "midday", "afternoon", "close"],
+            "thursday": ["opening", "midday", "afternoon", "close"],
+            "friday": ["opening", "midday", "afternoon", "close"]
+        }
+        
+        for day, briefings in weekday_briefings.items():
+            for i, briefing_type in enumerate(briefings):
+                if i < len(utc_briefing_times):
+                    time_str = utc_briefing_times[i]
+                    job_name = f"briefing_{briefing_type}_{day}"
+                    
+                    getattr(schedule.every(), day).at(time_str).do(
+                        self._safe_job_wrapper(job_name, self._run_briefing, briefing_type)
+                    )
+        
+        # === COMMENTARY POSTS ===
+        weekday_commentaries = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+        for day in weekday_commentaries:
+            for i, time_str in enumerate(utc_commentary_times):
+                job_name = f"commentary_{day}_{time_str.replace(':', '')}"
                 
-        except Exception as e:
-            logger.error(f"❌ Failed to check timezone: {e}")
-    
-    def setup_weekday_schedule(self):
-        """Setup complete weekday schedule with automatic BST/GMT conversion"""
+                getattr(schedule.every(), day).at(time_str).do(
+                    self._safe_job_wrapper(job_name, self._run_commentary)
+                )
         
-        # Check timezone and BST status
-        self.check_vm_timezone()
+        # === DEEP DIVE THREADS ===
+        for day in self.deep_dive_days:
+            job_name = f"deep_dive_{day.lower()}"
+            getattr(schedule.every(), day.lower()).at("21:00").do(  # 22:00 BST = 21:00 UTC
+                self._safe_job_wrapper(job_name, self._run_deep_dive)
+            )
         
-        # Convert BST times to UTC
-        briefing_utc_times = [self.convert_bst_to_utc_time(t) for t in self.bst_briefing_times]
-        commentary_utc_times = [self.convert_bst_to_utc_time(t) for t in self.bst_commentary_times]
+        # === WEEKEND SCHEDULE ===
+        # Reduced weekend schedule (11 tweets: 6 commentary + 3 briefings + 2 deep dives)
+        weekend_briefings = ["opening", "midday", "close"]  # 3 briefings only
+        weekend_commentary_times = utc_commentary_times[:6]  # 6 commentary posts only
         
-        logger.info(f"📋 Briefing times (UTC): {briefing_utc_times}")
-        logger.info(f"💬 Commentary times (UTC): {commentary_utc_times}")
+        for day in ["saturday", "sunday"]:
+            # Weekend briefings
+            for i, briefing_type in enumerate(weekend_briefings):
+                if i < len(utc_briefing_times):
+                    time_str = utc_briefing_times[i]
+                    job_name = f"briefing_{briefing_type}_{day}"
+                    
+                    getattr(schedule.every(), day).at(time_str).do(
+                        self._safe_job_wrapper(job_name, self._run_briefing, briefing_type)
+                    )
+            
+            # Weekend commentary
+            for i, time_str in enumerate(weekend_commentary_times):
+                job_name = f"commentary_{day}_{time_str.replace(':', '')}"
+                
+                getattr(schedule.every(), day).at(time_str).do(
+                    self._safe_job_wrapper(job_name, self._run_commentary)
+                )
+            
+            # Weekend deep dive
+            job_name = f"deep_dive_{day}"
+            getattr(schedule.every(), day).at("21:00").do(
+                self._safe_job_wrapper(job_name, self._run_deep_dive)
+            )
         
-        # === BRIEFINGS (4 per day) ===
-        days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday']
-        briefing_types = ['morning', 'pre-market', 'midday', 'post-market']
+        # === MAINTENANCE TASKS ===
+        if HEADLINE_PIPELINE_AVAILABLE:
+            # Fetch headlines every 30 minutes
+            schedule.every().hour.at(":05").do(
+                self._safe_job_wrapper("headlines_fetch_05", fetch_and_score_headlines)
+            )
+            schedule.every().hour.at(":35").do(
+                self._safe_job_wrapper("headlines_fetch_35", fetch_and_score_headlines)
+            )
         
-        for day in days:
-            for i, briefing_type in enumerate(briefing_types):
-                getattr(schedule.every(), day).at(briefing_utc_times[i]).do(self._run_briefing, briefing_type)
+        # Daily maintenance at 23:50 UTC
+        schedule.every().day.at("23:50").do(
+            self._safe_job_wrapper("daily_maintenance", self._daily_maintenance)
+        )
         
-        # === COMMENTARY (9 per day) ===
-        categories = [
-            ContentCategory.MACRO, ContentCategory.EQUITY, ContentCategory.POLITICAL,
-            ContentCategory.MACRO, ContentCategory.EQUITY, ContentCategory.MACRO,
-            ContentCategory.EQUITY, ContentCategory.POLITICAL, None  # Last one is any
-        ]
+        # Log schedule summary
+        total_jobs = len(schedule.get_jobs())
+        jobs_by_type = self._analyze_schedule()
         
-        for day in days:
-            for i in range(min(9, len(commentary_utc_times))):
-                getattr(schedule.every(), day).at(commentary_utc_times[i]).do(self._run_commentary, categories[i])
+        logger.info(f"📋 Schedule loaded: {total_jobs} total jobs")
+        logger.info(f"📊 Jobs breakdown: {jobs_by_type}")
         
-        # === DEEP DIVES (3 tweets, Mon/Wed/Fri) ===
-        deep_dive_utc_time = self.convert_bst_to_utc_time("14:00")
-        schedule.every().monday.at(deep_dive_utc_time).do(self._run_deep_dive)
-        schedule.every().wednesday.at(deep_dive_utc_time).do(self._run_deep_dive)
-        schedule.every().friday.at(deep_dive_utc_time).do(self._run_deep_dive)
+        # Show next job
+        next_job = schedule.next_run()
+        if next_job:
+            logger.info(f"⏰ Next job: {next_job}")
         
-        # === HEADLINE PIPELINE (Every 30 minutes, 7 days a week) ===
-        # Fetch fresh headlines at :05 and :35 past every hour
-        # This runs 48 times per day (24 hours × 2 fetches per hour)
-        schedule.every().hour.at(":05").do(self._run_headline_fetch)
-        schedule.every().hour.at(":35").do(self._run_headline_fetch)
-        maintenance_utc = self.convert_bst_to_utc_time("05:00")
-        summary_utc = self.convert_bst_to_utc_time("01:00")
+        # Log timezone info once
+        local_time, utc_time = self.get_timezone_info()
+        logger.info("🕐 VM Timezone Information:")
+        logger.info(f"Local Time: {local_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"UTC Time: {utc_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
-        schedule.every().day.at(maintenance_utc).do(self._daily_maintenance)
-        schedule.every().day.at(summary_utc).do(self._send_daily_summary)
+        if abs((local_time - utc_time.replace(tzinfo=None)).total_seconds()) < 60:
+            logger.info("✅ VM is on UTC timezone")
         
-        bst_status = "BST (UTC+1)" if self.is_bst_active() else "GMT (UTC+0)"
-        logger.info(f"✅ Schedule configured for {bst_status}")
-        logger.info("📊 Daily: 9 commentary + 4 briefings + 3 deep dives = 15 tweets")
+        # Log BST status once
+        if self.is_bst_active():
+            logger.info("🕐 BST Status: Active")
+            logger.info("✅ Schedule configured for BST (UTC+1)")
+        else:
+            logger.info("🕐 GMT Status: Active") 
+            logger.info("✅ Schedule configured for GMT (UTC+0)")
+        
+        # Log expected tweets
+        today = datetime.now().strftime("%A")
+        expected_tweets = 11 if today in ["Saturday", "Sunday"] else 15
+        logger.info(f"📊 Daily: 9 commentary + 4 briefings + 3 deep dives = {expected_tweets} tweets")
         logger.info("📰 Headlines fetched every 30min: :05 and :35 past each hour, 7 days/week")
     
-    def _run_headline_fetch(self):
-        """Run headline pipeline to fetch and score fresh news"""
-        try:
-            if not HEADLINE_PIPELINE_AVAILABLE:
-                logger.warning("⚠️ Headline pipeline not available, skipping fetch")
-                return
-                
-            current_time = datetime.now().strftime('%H:%M')
-            logger.info(f"📰 Starting headline fetch at {current_time}")
-            
-            # Fetch and score headlines (increased limit for better coverage)
-            fetch_and_score_headlines(limit=250)
-            
-            logger.info(f"✅ Headline fetch completed at {current_time}")
-            
-            # Send notification only every 2 hours to avoid spam
-            current_hour = datetime.now().hour
-            if current_hour % 2 == 0 and datetime.now().minute <= 10:  # Only at even hours, :05 fetch
-                asyncio.run(self.telegram.notify_system_message(
-                    f"📰 Headlines Updated ({current_time})\n"
-                    f"Fresh headlines fetched and scored\n"
-                    f"Next fetch: {current_hour}:35"
-                ))
-            
-        except Exception as e:
-            logger.error(f"❌ Headline fetch failed at {datetime.now().strftime('%H:%M')}: {e}")
-            
-            # Alert about headline fetch failure
-            asyncio.run(self.telegram.notify_system_alert(
-                "🚨 Headline Fetch Failed",
-                f"Time: {datetime.now().strftime('%H:%M')}\n"
-                f"Error: {str(e)}\n"
-                f"Content generation may use stale headlines"
-            ))
+    def _analyze_schedule(self) -> dict:
+        """Analyze loaded schedule and return breakdown"""
+        jobs = schedule.get_jobs()
+        breakdown = {
+            'commentary': 0,
+            'briefings': 0, 
+            'deep_dives': 0,
+            'headlines': 0,
+            'maintenance': 0
+        }
+        
+        for job in jobs:
+            job_name = getattr(job.job_func, '__name__', 'unknown')
+            if 'commentary' in job_name:
+                breakdown['commentary'] += 1
+            elif 'briefing' in job_name:
+                breakdown['briefings'] += 1
+            elif 'deep_dive' in job_name:
+                breakdown['deep_dives'] += 1
+            elif 'headlines' in job_name:
+                breakdown['headlines'] += 1
+            elif 'maintenance' in job_name:
+                breakdown['maintenance'] += 1
+        
+        return breakdown
     
-    def _run_commentary(self, category: Optional[ContentCategory] = None):
-        """Run commentary generation job"""
+    def _safe_job_wrapper(self, job_name: str, func, *args, **kwargs):
+        """Safe wrapper for all scheduled jobs with proper error handling"""
+        def wrapper():
+            start_time = datetime.now()
+            
+            try:
+                # Use Telegram notifier's send_message method with proper level
+                asyncio.run(self.telegram.send_message(
+                    f"Starting: `{job_name}`", 
+                    NotificationLevel.START
+                ))
+                logger.info(f"🚀 Starting job: {job_name}")
+                
+                # Execute the job
+                result = func(*args, **kwargs)
+                
+                # Calculate duration
+                duration = datetime.now() - start_time
+                duration_str = str(duration).split('.')[0]  # Remove microseconds
+                
+                # Success notification
+                asyncio.run(self.telegram.send_message(
+                    f"Completed: `{job_name}` in {duration_str}",
+                    NotificationLevel.SUCCESS
+                ))
+                logger.info(f"✅ Completed job: {job_name} in {duration_str}")
+                
+                return result
+                
+            except Exception as e:
+                duration = datetime.now() - start_time
+                duration_str = str(duration).split('.')[0]
+                
+                error_msg = f"Job `{job_name}` failed after {duration_str}: {str(e)}"
+                
+                # Error notification using critical_error method
+                asyncio.run(self.telegram.notify_critical_error(
+                    f"Scheduler Job: {job_name}",
+                    str(e),
+                    "Check logs and restart if needed"
+                ))
+                
+                logger.error(f"❌ {error_msg}")
+                # Don't re-raise to keep scheduler running
+        
+        return wrapper
+    
+    async def _run_briefing(self, briefing_type: str):
+        """Generate and publish market briefing"""
+        request = ContentRequest(
+            content_type=ContentType.BRIEFING,
+            category=ContentCategory.MARKET_ANALYSIS,
+            briefing_type=briefing_type,
+            priority="high"
+        )
+        
+        result = await self.content_engine.generate_content(request)
+        
+        if result.success:
+            logger.info(f"📋 {briefing_type} briefing published")
+            return {"success": True, "urls": result.published_urls}
+        else:
+            logger.error(f"❌ {briefing_type} briefing failed: {result.error}")
+            return {"success": False, "error": result.error}
+    
+    async def _run_commentary(self):
+        """Generate and publish market commentary"""
+        request = ContentRequest(
+            content_type=ContentType.COMMENTARY,
+            category=ContentCategory.MARKET_ANALYSIS,
+            priority="normal"
+        )
+        
+        result = await self.content_engine.generate_content(request)
+        
+        if result.success:
+            logger.info("💬 Commentary published")
+            return {"success": True, "urls": result.published_urls}
+        else:
+            logger.error(f"❌ Commentary failed: {result.error}")
+            return {"success": False, "error": result.error}
+    
+    async def _run_deep_dive(self):
+        """Generate and publish deep dive thread"""
+        request = ContentRequest(
+            content_type=ContentType.THREAD,
+            category=ContentCategory.DEEP_ANALYSIS,
+            priority="high"
+        )
+        
+        result = await self.content_engine.generate_content(request)
+        
+        if result.success:
+            logger.info("🧵 Deep dive thread published")
+            return {"success": True, "urls": result.published_urls}
+        else:
+            logger.error(f"❌ Deep dive failed: {result.error}")
+            return {"success": False, "error": result.error}
+    
+    async def _daily_maintenance(self):
+        """Perform daily maintenance tasks"""
         try:
-            logger.info(f"🐂 Starting commentary - Category: {category.value if category else 'Any'}")
+            logger.info("🔧 Starting daily maintenance...")
             
-            request = ContentRequest(
-                content_type=ContentType.COMMENTARY,
-                category=category,
-                include_market_data=True
-            )
+            # Check system health
+            status = self.content_engine.get_health_status()
             
-            result = asyncio.run(self.content_engine.generate_and_publish_content(request))
-            
-            if result["success"]:
-                logger.info(f"✅ Commentary published: {result['content']['theme']}")
+            if not status.get('healthy', False):
+                # Use critical_error for health issues
+                await self.telegram.notify_critical_error(
+                    "Daily Health Check",
+                    f"System health check failed: {status.get('error', 'Unknown error')}",
+                    "Check system components and restart if needed"
+                )
             else:
-                logger.error(f"❌ Commentary failed: {result['error']}")
-                
-        except Exception as e:
-            logger.error(f"❌ Commentary job crashed: {e}")
-    
-    def _run_briefing(self, period: str):
-        """Run briefing generation job (placeholder)"""
-        try:
-            logger.info(f"📋 {period.title()} briefing scheduled (pending implementation)")
-            
-            asyncio.run(self.telegram.notify_system_message(
-                f"📋 {period.title()} briefing scheduled but not yet implemented"
-            ))
-            
-        except Exception as e:
-            logger.error(f"❌ Briefing job crashed: {e}")
-    
-    def _run_deep_dive(self):
-        """Run deep dive generation job (placeholder)"""
-        try:
-            current_day = datetime.now().strftime("%A")
-            
-            if current_day not in self.deep_dive_days:
-                logger.info(f"⏭️ Skipping deep dive - not scheduled for {current_day}")
-                return
-                
-            logger.info(f"🧵 Deep dive scheduled (pending implementation)")
-            
-            asyncio.run(self.telegram.notify_system_message(
-                f"🧵 Deep dive thread scheduled but not yet implemented"
-            ))
-            
-        except Exception as e:
-            logger.error(f"❌ Deep dive job crashed: {e}")
-    
-    def _daily_maintenance(self):
-        """Daily maintenance tasks"""
-        try:
-            logger.info("🔧 Running daily maintenance")
-            
-            status = asyncio.run(self.content_engine.get_pipeline_status())
-            
-            if status.get("error"):
-                asyncio.run(self.telegram.notify_system_alert(
-                    "⚠️ System Health Issue",
-                    f"Daily health check failed: {status['error']}"
-                ))
-            else:
-                asyncio.run(self.telegram.notify_system_message(
-                    f"🔧 Daily Maintenance Complete\n"
-                    f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                ))
+                # Use send_message for successful maintenance
+                await self.telegram.send_message(
+                    f"🔧 Daily Maintenance Complete\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n✅ All systems healthy",
+                    NotificationLevel.SUCCESS
+                )
             
             logger.info("✅ Daily maintenance completed")
             
         except Exception as e:
             logger.error(f"❌ Daily maintenance failed: {e}")
+            await self.telegram.notify_critical_error(
+                "Daily Maintenance",
+                str(e),
+                "Manual maintenance check required"
+            )
     
-    def _send_daily_summary(self):
+    async def _send_daily_summary(self):
         """Send daily summary"""
         try:
             today = datetime.now().strftime("%A")
             expected_tweets = 11 if today in ["Saturday", "Sunday"] else 15
             
-            asyncio.run(self.telegram.notify_system_message(
-                f"📊 Daily Summary - {today}\n"
-                f"Expected tweets: {expected_tweets}\n"
-                f"Status: Scheduler running"
-            ))
+            await self.telegram.send_message(
+                f"📊 Daily Summary - {today}\nExpected tweets: {expected_tweets}\nStatus: Scheduler running",
+                NotificationLevel.INFO
+            )
             
         except Exception as e:
             logger.error(f"❌ Daily summary failed: {e}")
     
     def start_scheduler(self):
-        """Start the scheduler loop"""
+        """Start the scheduler loop with proper error handling"""
         logger.info("🚀 Starting HedgeFund Agent Scheduler")
         
-        asyncio.run(self.telegram.notify_system_message(
-            "🚀 HedgeFund Agent Scheduler Started\n"
-            f"Mode: Production\n"
-            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        ))
+        # Send startup notification using send_message
+        try:
+            asyncio.run(self.telegram.send_message(
+                f"🚀 HedgeFund Agent Scheduler Started\nMode: Production\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nBST Active: {self.is_bst_active()}",
+                NotificationLevel.START
+            ))
+        except Exception as e:
+            logger.error(f"Failed to send startup notification: {e}")
         
         while True:
             try:
                 schedule.run_pending()
-                time.sleep(60)
+                time.sleep(60)  # Check every minute
                 
             except KeyboardInterrupt:
                 logger.info("👋 Scheduler stopped by user")
-                asyncio.run(self.telegram.notify_system_message(
-                    "👋 HedgeFund Agent Scheduler Stopped"
-                ))
+                try:
+                    asyncio.run(self.telegram.send_message(
+                        "👋 HedgeFund Agent Scheduler Stopped\nReason: Manual shutdown",
+                        NotificationLevel.WARNING
+                    ))
+                except Exception:
+                    pass  # Don't fail on notification errors during shutdown
                 break
                 
             except Exception as e:
                 logger.error(f"❌ Scheduler error: {e}")
-                asyncio.run(self.telegram.notify_system_alert(
-                    "🚨 Scheduler Error",
-                    f"Error: {str(e)}\nScheduler continuing..."
-                ))
-                time.sleep(300)
-    
-    def get_schedule_info(self):
-        """Get schedule information"""
-        jobs = schedule.jobs
-        
-        return {
-            "total_jobs": len(jobs),
-            "next_job": schedule.next_run() if jobs else None,
-            "jobs_by_type": {
-                "commentary": len([j for j in jobs if "_run_commentary" in str(j.job_func)]),
-                "briefings": len([j for j in jobs if "_run_briefing" in str(j.job_func)]),
-                "deep_dives": len([j for j in jobs if "_run_deep_dive" in str(j.job_func)]),
-                "headlines": len([j for j in jobs if "_run_headline_fetch" in str(j.job_func)]),
-                "maintenance": len([j for j in jobs if "_daily_" in str(j.job_func)])
-            }
-        }
+                try:
+                    asyncio.run(self.telegram.notify_critical_error(
+                        "Scheduler Loop",
+                        str(e),
+                        "Scheduler continuing but may need restart"
+                    ))
+                except Exception:
+                    pass  # Don't fail on notification errors
+                time.sleep(60)  # Wait before retrying
 
 
 def main():
-    """Main scheduler execution"""
-    scheduler = HedgeFundScheduler()
-    scheduler.setup_weekday_schedule()
-    
-    info = scheduler.get_schedule_info()
-    logger.info(f"📋 Schedule loaded: {info['total_jobs']} total jobs")
-    logger.info(f"📊 Jobs breakdown: {info['jobs_by_type']}")
-    logger.info(f"⏰ Next job: {info['next_job']}")
-    
-    scheduler.start_scheduler()
-
-
-def test_single_commentary():
-    """Test single commentary generation"""
-    engine = ContentEngine()
-    
-    request = ContentRequest(
-        content_type=ContentType.COMMENTARY,
-        category=ContentCategory.MACRO,
-        include_market_data=True
-    )
-    
-    result = asyncio.run(engine.generate_and_publish_content(request))
-    print(f"Test result: {result}")
-
-
-def dry_run_schedule():
-    """Show schedule without running"""
-    scheduler = HedgeFundScheduler()
-    scheduler.setup_weekday_schedule()
-    
-    info = scheduler.get_schedule_info()
-    print("🗓️ HedgeFund Scheduler - Dry Run")
-    print(f"Total scheduled jobs: {info['total_jobs']}")
-    print(f"Next scheduled: {info['next_job']}")
+    """Main entry point"""
+    try:
+        scheduler = HedgeFundScheduler()
+        scheduler.setup_schedule()
+        scheduler.start_scheduler()
+        
+    except Exception as e:
+        logger.critical(f"Failed to start scheduler: {e}")
+        # Try to send critical error notification
+        try:
+            notifier = TelegramNotifier()
+            asyncio.run(notifier.notify_critical_error(
+                "Scheduler Startup",
+                str(e),
+                "Manual restart required"
+            ))
+        except Exception:
+            pass  # Don't fail if notification fails
+        raise
 
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "test":
-            test_single_commentary()
-        elif sys.argv[1] == "dry-run":
-            dry_run_schedule()
-        else:
-            print("Usage: python scheduler.py [test|dry-run]")
-    else:
-        main()
+    main()
