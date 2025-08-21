@@ -25,11 +25,13 @@ from services.telegram_notifier import TelegramNotifier, NotificationLevel
 
 # Import headline pipeline from services
 try:
-    from services.headline_pipeline import fetch_and_score_headlines
+    from services.headline_pipeline import HeadlinePipeline
+    from services.database_service import DatabaseService
+    from config.settings import DATABASE_CONFIG
     HEADLINE_PIPELINE_AVAILABLE = True
-    logger.info("✅ Headline pipeline imported successfully from services")
+    logger.info("✅ Modern HeadlinePipeline imported successfully from services")
 except ImportError as e:
-    logger.warning(f"⚠️ Headline pipeline not available: {e}")
+    logger.error(f"❌ Failed to import HeadlinePipeline from services: {e}")
     HEADLINE_PIPELINE_AVAILABLE = False
 
 class HedgeFundScheduler:
@@ -40,6 +42,17 @@ class HedgeFundScheduler:
         self.telegram = TelegramNotifier()
         self.deep_dive_days = ["Monday", "Wednesday", "Friday"]
         
+        # Initialize headline pipeline (modern services version only)
+        self.headline_pipeline = None
+        if HEADLINE_PIPELINE_AVAILABLE:
+            try:
+                db_service = DatabaseService(DATABASE_CONFIG)
+                self.headline_pipeline = HeadlinePipeline(db_service)
+                logger.info("✅ Modern HeadlinePipeline initialized with database integration")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize HeadlinePipeline: {e}")
+                self.headline_pipeline = None
+        
         # BST/GMT aware scheduling - these are your desired BST times
         self.bst_briefing_times = ["07:30", "14:15", "17:00", "21:45"]
         self.bst_commentary_times = ["07:00", "08:00", "10:00", "11:00", "15:30", "18:00", "20:00", "22:00", "23:00"]
@@ -47,7 +60,19 @@ class HedgeFundScheduler:
         # Calculate BST status once during initialization
         self._bst_active = self._calculate_bst_status()
         
+        # Heartbeat configuration
+        self.last_heartbeat = time.time()
+        self.heartbeat_interval = 3600  # Send heartbeat every hour (3600 seconds)
+        self.startup_time = datetime.now(timezone.utc)
+        
+        # Health metrics
+        self.jobs_completed_today = 0
+        self.jobs_failed_today = 0
+        self.last_job_time = None
+        self.last_job_name = None
+        
         logger.info("🗓️ HedgeFund Scheduler initialized")
+        logger.info(f"💓 Heartbeat interval: {self.heartbeat_interval/60:.0f} minutes")
     
     def _calculate_bst_status(self) -> bool:
         """Calculate if British Summer Time is currently active - called once"""
@@ -170,26 +195,48 @@ class HedgeFundScheduler:
             )
         
         # === MAINTENANCE TASKS ===
-        if HEADLINE_PIPELINE_AVAILABLE:
-            # Fetch headlines every 30 minutes
+        if HEADLINE_PIPELINE_AVAILABLE and self.headline_pipeline:
+            # Fetch headlines every 30 minutes using modern pipeline
+            # Note: These create recurring jobs, not individual jobs for each time
             schedule.every().hour.at(":05").do(
-                self._safe_job_wrapper("headlines_fetch_05", fetch_and_score_headlines)
+                self._safe_job_wrapper("headlines_fetch_05", self._run_headline_pipeline)
             )
             schedule.every().hour.at(":35").do(
-                self._safe_job_wrapper("headlines_fetch_35", fetch_and_score_headlines)
+                self._safe_job_wrapper("headlines_fetch_35", self._run_headline_pipeline)
             )
         
-        # Daily maintenance at 23:50 UTC
+        # Daily maintenance at 23:50 UTC (recurring)
         schedule.every().day.at("23:50").do(
             self._safe_job_wrapper("daily_maintenance", self._daily_maintenance)
         )
         
-        # Log schedule summary
+        # Hourly heartbeat (every hour at :00) - recurring
+        schedule.every().hour.at(":00").do(
+            self._safe_job_wrapper("heartbeat", self._send_heartbeat)
+        )
+        
+        # Log schedule summary with detailed breakdown
         total_jobs = len(schedule.get_jobs())
         jobs_by_type = self._analyze_schedule()
         
         logger.info(f"📋 Schedule loaded: {total_jobs} total jobs")
         logger.info(f"📊 Jobs breakdown: {jobs_by_type}")
+        
+        # Debug: Show all job details if count seems too high OR if categorization fails
+        if total_jobs > 50 or sum(jobs_by_type.values()) < total_jobs / 2:
+            logger.warning(f"⚠️ Job analysis issue detected. Showing first 10 jobs:")
+            for i, job in enumerate(schedule.get_jobs()[:10]):  # Show first 10 jobs
+                logger.info(f"   Job {i+1}: {job}")
+                logger.debug(f"     Function: {job.job_func}")
+                logger.debug(f"     Function name: {getattr(job.job_func, '__name__', 'unknown')}")
+            if total_jobs > 10:
+                logger.info(f"   ... and {total_jobs - 10} more jobs")
+        
+        # Show headline pipeline status
+        if HEADLINE_PIPELINE_AVAILABLE and self.headline_pipeline:
+            logger.info("📰 Headlines: Modern pipeline with database integration - every 30min at :05 and :35")
+        else:
+            logger.warning("📰 Headlines: Pipeline not available - headline jobs will fail")
         
         # Show next job
         next_job = schedule.next_run()
@@ -227,21 +274,44 @@ class HedgeFundScheduler:
             'briefings': 0, 
             'deep_dives': 0,
             'headlines': 0,
-            'maintenance': 0
+            'maintenance': 0,
+            'unknown': 0
         }
         
         for job in jobs:
-            job_name = getattr(job.job_func, '__name__', 'unknown')
-            if 'commentary' in job_name:
+            # Try to get category from wrapper attributes first
+            if hasattr(job.job_func, '_job_category'):
+                category = job.job_func._job_category
+                if category in breakdown:
+                    breakdown[category] += 1
+                    continue
+            
+            # Fallback to string analysis
+            job_str = str(job).lower()
+            func_name = getattr(job.job_func, '__name__', 'unknown').lower()
+            
+            categorized = False
+            
+            if 'commentary' in job_str or 'commentary' in func_name:
                 breakdown['commentary'] += 1
-            elif 'briefing' in job_name:
+                categorized = True
+            elif 'briefing' in job_str or 'briefing' in func_name:
                 breakdown['briefings'] += 1
-            elif 'deep_dive' in job_name:
+                categorized = True
+            elif 'deep_dive' in job_str or 'deep_dive' in func_name:
                 breakdown['deep_dives'] += 1
-            elif 'headlines' in job_name:
+                categorized = True
+            elif 'headlines' in job_str or 'headlines' in func_name:
                 breakdown['headlines'] += 1
-            elif 'maintenance' in job_name:
+                categorized = True
+            elif ('maintenance' in job_str or 'heartbeat' in job_str or 
+                  'maintenance' in func_name or 'heartbeat' in func_name):
                 breakdown['maintenance'] += 1
+                categorized = True
+            
+            if not categorized:
+                breakdown['unknown'] += 1
+                logger.debug(f"Unknown job: {job_str} (func: {func_name})")
         
         return breakdown
     
@@ -258,12 +328,20 @@ class HedgeFundScheduler:
                 ))
                 logger.info(f"🚀 Starting job: {job_name}")
                 
-                # Execute the job
-                result = func(*args, **kwargs)
+                # Execute the job - handle both sync and async functions
+                if asyncio.iscoroutinefunction(func):
+                    result = asyncio.run(func(*args, **kwargs))
+                else:
+                    result = func(*args, **kwargs)
                 
                 # Calculate duration
                 duration = datetime.now() - start_time
                 duration_str = str(duration).split('.')[0]  # Remove microseconds
+                
+                # Update health metrics
+                self.jobs_completed_today += 1
+                self.last_job_time = datetime.now()
+                self.last_job_name = job_name
                 
                 # Success notification
                 asyncio.run(self.telegram.send_message(
@@ -278,6 +356,9 @@ class HedgeFundScheduler:
                 duration = datetime.now() - start_time
                 duration_str = str(duration).split('.')[0]
                 
+                # Update failure metrics
+                self.jobs_failed_today += 1
+                
                 error_msg = f"Job `{job_name}` failed after {duration_str}: {str(e)}"
                 
                 # Error notification using critical_error method
@@ -290,59 +371,169 @@ class HedgeFundScheduler:
                 logger.error(f"❌ {error_msg}")
                 # Don't re-raise to keep scheduler running
         
+        # Store job name as an attribute for analysis
+        wrapper.__name__ = f"wrapper_{job_name}"
+        wrapper._job_name = job_name
+        wrapper._job_category = self._categorize_job_name(job_name)
+        
         return wrapper
+    
+    def _categorize_job_name(self, job_name: str) -> str:
+        """Categorize job by name for analysis"""
+        job_name_lower = job_name.lower()
+        
+        if 'commentary' in job_name_lower:
+            return 'commentary'
+        elif 'briefing' in job_name_lower:
+            return 'briefings'
+        elif 'deep_dive' in job_name_lower:
+            return 'deep_dives'
+        elif 'headlines' in job_name_lower:
+            return 'headlines'
+        elif 'maintenance' in job_name_lower or 'heartbeat' in job_name_lower:
+            return 'maintenance'
+        else:
+            return 'unknown'
     
     async def _run_briefing(self, briefing_type: str):
         """Generate and publish market briefing"""
         request = ContentRequest(
             content_type=ContentType.BRIEFING,
-            category=ContentCategory.MARKET_ANALYSIS,
-            briefing_type=briefing_type,
-            priority="high"
+            category=ContentCategory.MACRO,  # Use MACRO for market briefings
+            include_market_data=True
         )
         
-        result = await self.content_engine.generate_content(request)
+        result = await self.content_engine.generate_and_publish_content(request)
         
-        if result.success:
+        if result.get('success'):
             logger.info(f"📋 {briefing_type} briefing published")
-            return {"success": True, "urls": result.published_urls}
+            twitter_url = result.get('publishing', {}).get('twitter', {}).get('url')
+            return {"success": True, "urls": [twitter_url] if twitter_url else []}
         else:
-            logger.error(f"❌ {briefing_type} briefing failed: {result.error}")
-            return {"success": False, "error": result.error}
+            logger.error(f"❌ {briefing_type} briefing failed: {result.get('error')}")
+            return {"success": False, "error": result.get('error')}
     
     async def _run_commentary(self):
-        """Generate and publish market commentary"""
-        request = ContentRequest(
-            content_type=ContentType.COMMENTARY,
-            category=ContentCategory.MARKET_ANALYSIS,
-            priority="normal"
-        )
-        
-        result = await self.content_engine.generate_content(request)
-        
-        if result.success:
-            logger.info("💬 Commentary published")
-            return {"success": True, "urls": result.published_urls}
-        else:
-            logger.error(f"❌ Commentary failed: {result.error}")
-            return {"success": False, "error": result.error}
+        """Generate and publish market commentary using convenience function"""
+        try:
+            # Use the convenience function from content_engine
+            from core.content_engine import publish_commentary_now
+            result = await publish_commentary_now()
+            
+            if result.get('success'):
+                logger.info("💬 Commentary published successfully")
+                twitter_url = result.get('publishing', {}).get('twitter', {}).get('url')
+                return {"success": True, "urls": [twitter_url] if twitter_url else []}
+            else:
+                logger.error(f"❌ Commentary failed: {result.get('error')}")
+                return {"success": False, "error": result.get('error')}
+                
+        except Exception as e:
+            logger.error(f"❌ Commentary generation failed: {e}")
+            return {"success": False, "error": str(e)}
     
     async def _run_deep_dive(self):
         """Generate and publish deep dive thread"""
         request = ContentRequest(
-            content_type=ContentType.THREAD,
-            category=ContentCategory.DEEP_ANALYSIS,
-            priority="high"
+            content_type=ContentType.DEEP_DIVE,  # Use DEEP_DIVE not THREAD
+            category=ContentCategory.MACRO,  # Use MACRO for deep dives
+            include_market_data=True
         )
         
-        result = await self.content_engine.generate_content(request)
+        result = await self.content_engine.generate_and_publish_content(request)
         
-        if result.success:
+        if result.get('success'):
             logger.info("🧵 Deep dive thread published")
-            return {"success": True, "urls": result.published_urls}
+            twitter_url = result.get('publishing', {}).get('twitter', {}).get('url')
+            return {"success": True, "urls": [twitter_url] if twitter_url else []}
         else:
-            logger.error(f"❌ Deep dive failed: {result.error}")
-            return {"success": False, "error": result.error}
+            logger.error(f"❌ Deep dive failed: {result.get('error')}")
+            return {"success": False, "error": result.get('error')}
+    
+    def _run_headline_pipeline(self):
+        """Run modern headline fetching and scoring pipeline"""
+        try:
+            if not self.headline_pipeline:
+                raise Exception("HeadlinePipeline not available")
+            
+            # Use modern services version with database integration
+            headlines_stored = self.headline_pipeline.run_pipeline()
+            logger.info(f"📰 Headlines pipeline completed: {headlines_stored} headlines stored to database")
+            return {"success": True, "headlines_stored": headlines_stored}
+                
+        except Exception as e:
+            logger.error(f"❌ Headlines pipeline failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def _send_heartbeat(self):
+        """Send periodic heartbeat with system status"""
+        try:
+            # Calculate uptime
+            uptime = datetime.now(timezone.utc) - self.startup_time
+            uptime_hours = uptime.total_seconds() / 3600
+            
+            # Get next scheduled job
+            next_job = schedule.next_run()
+            next_job_str = next_job.strftime('%H:%M UTC') if next_job else "None"
+            
+            # Get today's stats
+            today_str = datetime.now().strftime("%A")
+            expected_tweets = 11 if today_str in ["Saturday", "Sunday"] else 15
+            
+            # Calculate success rate
+            total_jobs = self.jobs_completed_today + self.jobs_failed_today
+            success_rate = 0 if total_jobs == 0 else (self.jobs_completed_today / total_jobs) * 100
+            
+            # Get system health
+            try:
+                health = await self.content_engine.get_pipeline_status()
+                health_summary = "✅ Healthy"
+                if 'error' in health:
+                    health_summary = f"⚠️ Issues: {health['error']}"
+            except Exception:
+                health_summary = "❓ Unknown"
+            
+            # Create heartbeat message
+            heartbeat_msg = f"""💓 **HedgeFund Scheduler Heartbeat**
+
+📊 **Status**: Active & Running
+⏰ **Uptime**: {uptime_hours:.1f}h
+🗓️ **Today**: {today_str} ({expected_tweets} tweets expected)
+
+📈 **Performance**:
+   • Jobs completed: {self.jobs_completed_today}
+   • Jobs failed: {self.jobs_failed_today}
+   • Success rate: {success_rate:.1f}%
+
+⏱️ **Scheduling**:
+   • Next job: {next_job_str}
+   • BST active: {self.is_bst_active()}
+   • Last job: {self.last_job_name or 'None'} at {self.last_job_time.strftime('%H:%M') if self.last_job_time else 'N/A'}
+
+🔧 **System Health**: {health_summary}"""
+            
+            await self.telegram.send_message(heartbeat_msg, NotificationLevel.HEARTBEAT)
+            logger.info("💓 Heartbeat sent successfully")
+            
+            # Reset daily counters at midnight
+            if datetime.now().hour == 0 and datetime.now().minute < 5:
+                self.jobs_completed_today = 0
+                self.jobs_failed_today = 0
+                logger.info("🔄 Daily metrics reset")
+            
+        except Exception as e:
+            logger.error(f"❌ Heartbeat failed: {e}")
+    
+    def _check_heartbeat_in_loop(self):
+        """Check if heartbeat should be sent (for non-scheduled heartbeat)"""
+        current_time = time.time()
+        
+        if current_time - self.last_heartbeat > self.heartbeat_interval:
+            try:
+                asyncio.run(self._send_heartbeat())
+                self.last_heartbeat = current_time
+            except Exception as e:
+                logger.error(f"❌ Loop heartbeat failed: {e}")
     
     async def _daily_maintenance(self):
         """Perform daily maintenance tasks"""
@@ -350,9 +541,9 @@ class HedgeFundScheduler:
             logger.info("🔧 Starting daily maintenance...")
             
             # Check system health
-            status = self.content_engine.get_health_status()
+            status = await self.content_engine.get_pipeline_status()
             
-            if not status.get('healthy', False):
+            if status.get('error') or status.get('status') == 'unhealthy':
                 # Use critical_error for health issues
                 await self.telegram.notify_critical_error(
                     "Daily Health Check",
@@ -360,11 +551,20 @@ class HedgeFundScheduler:
                     "Check system components and restart if needed"
                 )
             else:
-                # Use send_message for successful maintenance
-                await self.telegram.send_message(
-                    f"🔧 Daily Maintenance Complete\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n✅ All systems healthy",
-                    NotificationLevel.SUCCESS
-                )
+                # Create daily summary
+                today_stats = f"""🔧 **Daily Maintenance Complete**
+
+📅 **Date**: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}
+📊 **Today's Performance**:
+   • Jobs completed: {self.jobs_completed_today}
+   • Jobs failed: {self.jobs_failed_today}
+   • Success rate: {(self.jobs_completed_today/(max(self.jobs_completed_today+self.jobs_failed_today,1)))*100:.1f}%
+
+✅ **System Status**: All systems healthy
+🕐 **BST Active**: {self.is_bst_active()}
+⏰ **Uptime**: {((datetime.now(timezone.utc) - self.startup_time).total_seconds()/3600):.1f}h"""
+                
+                await self.telegram.send_message(today_stats, NotificationLevel.SUCCESS)
             
             logger.info("✅ Daily maintenance completed")
             
@@ -391,30 +591,57 @@ class HedgeFundScheduler:
             logger.error(f"❌ Daily summary failed: {e}")
     
     def start_scheduler(self):
-        """Start the scheduler loop with proper error handling"""
+        """Start the scheduler loop with proper error handling and heartbeat"""
         logger.info("🚀 Starting HedgeFund Agent Scheduler")
         
         # Send startup notification using send_message
         try:
-            asyncio.run(self.telegram.send_message(
-                f"🚀 HedgeFund Agent Scheduler Started\nMode: Production\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nBST Active: {self.is_bst_active()}",
-                NotificationLevel.START
-            ))
+            startup_msg = f"""🚀 **HedgeFund Agent Scheduler Started**
+
+📅 **Time**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
+🌍 **Mode**: Production
+🕐 **BST Active**: {self.is_bst_active()}
+💓 **Heartbeat**: Every {self.heartbeat_interval/60:.0f} minutes
+📊 **Jobs Loaded**: {len(schedule.get_jobs())} total scheduled jobs
+
+🎯 **Ready to generate content!**"""
+            
+            asyncio.run(self.telegram.send_message(startup_msg, NotificationLevel.START))
         except Exception as e:
             logger.error(f"Failed to send startup notification: {e}")
         
+        # Send initial heartbeat
+        try:
+            asyncio.run(self._send_heartbeat())
+            self.last_heartbeat = time.time()
+        except Exception as e:
+            logger.error(f"Failed to send initial heartbeat: {e}")
+        
+        # Main scheduler loop
         while True:
             try:
+                # Run scheduled jobs
                 schedule.run_pending()
-                time.sleep(60)  # Check every minute
+                
+                # Check for heartbeat (backup to scheduled heartbeat)
+                self._check_heartbeat_in_loop()
+                
+                # Sleep for 30 seconds (more responsive than 60)
+                time.sleep(30)
                 
             except KeyboardInterrupt:
                 logger.info("👋 Scheduler stopped by user")
                 try:
-                    asyncio.run(self.telegram.send_message(
-                        "👋 HedgeFund Agent Scheduler Stopped\nReason: Manual shutdown",
-                        NotificationLevel.WARNING
-                    ))
+                    shutdown_msg = f"""👋 **HedgeFund Agent Scheduler Stopped**
+
+📅 **Time**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
+🛑 **Reason**: Manual shutdown (Ctrl+C)
+⏰ **Final Uptime**: {((datetime.now(timezone.utc) - self.startup_time).total_seconds()/3600):.1f}h
+📊 **Today's Stats**: {self.jobs_completed_today} completed, {self.jobs_failed_today} failed
+
+✅ **Shutdown clean**"""
+                    
+                    asyncio.run(self.telegram.send_message(shutdown_msg, NotificationLevel.WARNING))
                 except Exception:
                     pass  # Don't fail on notification errors during shutdown
                 break
@@ -429,7 +656,7 @@ class HedgeFundScheduler:
                     ))
                 except Exception:
                     pass  # Don't fail on notification errors
-                time.sleep(60)  # Wait before retrying
+                time.sleep(60)  # Wait longer before retrying after errors
 
 
 def main():
