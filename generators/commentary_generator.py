@@ -265,7 +265,7 @@ class CommentaryGenerator:
                     enriched_format = f"${ticker} (${price_data['price']:.2f}, {price_data['change_percent']:+.2f}%)"
                     
                     # Use regex to replace cashtag (word boundary)
-                    pattern = rf"\b\${ticker}\b"
+                    pattern = rf"\${ticker}(?=\s|$|[^\w])"
                     enriched_text = re.sub(pattern, enriched_format, enriched_text, flags=re.IGNORECASE)
                     
                     logger.info(f"💹 Enriched {ticker}: ${price_data['price']:.2f} ({price_data['change_percent']:+.2f}%)")

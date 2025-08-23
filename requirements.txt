@@ -57,4 +57,5 @@ setuptools
 cloudscraper
 munch
 
-aiohttp>=3.8.0
+aiohttp>=3.8.
+psycopg2-binary
