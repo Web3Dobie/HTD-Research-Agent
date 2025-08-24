@@ -1,11 +1,10 @@
 # hedgefund_agent/services/database_service.py
 import psycopg2
 import psycopg2.extras
-import psycopg2.extras
 import logging
 import json
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Dict, Optional
 
 # Use absolute imports for the core models
 import sys
@@ -148,6 +147,149 @@ class DatabaseService:
             raise
         finally:
             cursor.close()
+
+    def get_top_headlines_for_website(self, limit: int = 4, hours: int = 48, min_score: int = 7) -> List[dict]:
+        """Get top scoring headlines for website display"""
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        try:
+            cursor.execute("""
+                SELECT 
+                    id,
+                    headline, 
+                    summary,
+                    score, 
+                    category, 
+                    source, 
+                    url,
+                    created_at
+                FROM hedgefund_agent.headlines 
+                WHERE created_at >= NOW() - INTERVAL %s
+                AND score >= %s
+                ORDER BY score DESC, created_at DESC
+                LIMIT %s
+            """, (f'{hours} hours', min_score, limit))
+            
+            rows = cursor.fetchall()
+            
+            headlines = []
+            for row in rows:
+                headline_data = {
+                    "id": row['id'],
+                    "headline": row['headline'],
+                    "summary": row['summary'],
+                    "score": row['score'],
+                    "category": row['category'] or "general",
+                    "source": row['source'] or "financial_news",
+                    "url": row['url'] or "",
+                    "created_at": row['created_at']
+                }
+                headlines.append(headline_data)
+                
+            logger.info(f"📊 Retrieved {len(headlines)} top headlines for website")
+            return headlines
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to get top headlines for website: {e}")
+            return []
+        finally:
+            cursor.close()
+
+    def get_headlines_count(self) -> int:
+        """Get total count of headlines for health checks"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("SELECT COUNT(*) FROM hedgefund_agent.headlines")
+            count = cursor.fetchone()[0]
+            logger.debug(f"📊 Total headlines in database: {count}")
+            return count
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to get headlines count: {e}")
+            return 0
+        finally:
+            cursor.close()
+
+    def get_recent_headlines_by_category(self, category: str, limit: int = 10, hours: int = 24) -> List[dict]:
+        """Get recent headlines by category"""
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        try:
+            cursor.execute("""
+                SELECT 
+                    id,
+                    headline, 
+                    summary,
+                    score, 
+                    category, 
+                    source, 
+                    url,
+                    created_at,
+                    used
+                FROM hedgefund_agent.headlines 
+                WHERE category = %s
+                AND created_at >= NOW() - INTERVAL %s
+                ORDER BY score DESC, created_at DESC
+                LIMIT %s
+            """, (category, f'{hours} hours', limit))
+            
+            rows = cursor.fetchall()
+            
+            headlines = []
+            for row in rows:
+                headline_data = {
+                    "id": row['id'],
+                    "headline": row['headline'],
+                    "summary": row['summary'],
+                    "score": row['score'],
+                    "category": row['category'],
+                    "source": row['source'],
+                    "url": row['url'],
+                    "created_at": row['created_at'],
+                    "used": row['used']
+                }
+                headlines.append(headline_data)
+                
+            logger.info(f"📊 Retrieved {len(headlines)} {category} headlines")
+            return headlines
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to get {category} headlines: {e}")
+            return []
+        finally:
+            cursor.close()
+
+    def mark_headline_as_used(self, headline_id: int) -> bool:
+        """Mark a headline as used for content generation"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                UPDATE hedgefund_agent.headlines 
+                SET used = TRUE, used_at = %s 
+                WHERE id = %s
+            """, (datetime.now(), headline_id))
+            
+            conn.commit()
+            
+            if cursor.rowcount > 0:
+                logger.info(f"✅ Marked headline {headline_id} as used")
+                return True
+            else:
+                logger.warning(f"⚠️ No headline found with ID {headline_id}")
+                return False
+                
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"❌ Failed to mark headline {headline_id} as used: {e}")
+            return False
+        finally:
+            cursor.close()
     
     # === Theme Operations ===
     
@@ -212,42 +354,6 @@ class DatabaseService:
             raise
         finally:
             cursor.close()
-
-    # Add these methods to your existing services/database_service.py
-
-    async def get_headline_count(self) -> int:
-        """Get total number of headlines in database for health check"""
-        try:
-            with self._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM hedgefund_agent.headlines")
-                    return cur.fetchone()[0]
-        except Exception as e:
-            self.logger.error(f"❌ Failed to get headline count: {e}")
-            return 0
-
-    async def get_theme_count(self) -> int:
-        """Get total number of unique themes for health check"""
-        try:
-            with self._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM hedgefund_agent.themes_tracking")
-                    return cur.fetchone()[0]
-        except Exception as e:
-            self.logger.error(f"❌ Failed to get theme count: {e}")
-            return 0
-
-    async def test_connection(self) -> bool:
-        """Test database connection for health check"""
-        try:
-            with self._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT 1")
-                    result = cur.fetchone()
-                    return result[0] == 1
-        except Exception as e:
-            self.logger.error(f"❌ Database connection test failed: {e}")
-            return False
     
     # === System Logging ===
     
