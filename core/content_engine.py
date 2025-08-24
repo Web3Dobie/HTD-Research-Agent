@@ -17,6 +17,7 @@ from services.publishing_service import PublishingService
 from services.notion_publisher import NotionPublisher
 from services.telegram_notifier import TelegramNotifier
 from generators.commentary_generator import CommentaryGenerator
+from generators.deep_dive_generator import DeepDiveGenerator
 from config.settings import DATABASE_CONFIG, AGENT_NAME
 
 
@@ -42,23 +43,31 @@ class ContentEngine:
         # Content generators
         try:
             # CommentaryGenerator expects: data_service, gpt_service, market_client, config
-            commentary_config = {
-                "agent_name": AGENT_NAME,
-                "max_length": 280,
-                "include_market_data": True
-            }
-            
+            commentary_config = { "agent_name": AGENT_NAME, "include_market_data": True }
             self.commentary_generator = CommentaryGenerator(
-                data_service=self.database_service,  # Use database_service as data_service
+                data_service=self.database_service,
                 gpt_service=self.gpt_service,
                 market_client=self.market_client,
                 config=commentary_config
             )
             self.logger.info("✅ CommentaryGenerator initialized successfully")
-            
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize CommentaryGenerator: {e}")
             self.commentary_generator = None
+            
+        try:
+            # DeepDiveGenerator follows the same pattern
+            deep_dive_config = { "agent_name": AGENT_NAME, "include_market_data": True }
+            self.deep_dive_generator = DeepDiveGenerator(
+                data_service=self.database_service,
+                gpt_service=self.gpt_service,
+                market_client=self.market_client,
+                config=deep_dive_config
+            )
+            self.logger.info("✅ DeepDiveGenerator initialized successfully")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to initialize DeepDiveGenerator: {e}")
+            self.deep_dive_generator = None
         
         self.logger.info("✅ ContentEngine initialized with all services")
     
@@ -98,9 +107,13 @@ class ContentEngine:
                     "duration": duration
                 }
             
-            # Step 2: Publish to Twitter
+            # Step 2: Publish to Twitter (handles threads vs single tweets)
             self.logger.info(f"📢 Publishing content: {content.theme}")
-            twitter_result = self.publishing_service.publish_tweet(content)
+
+            if content.content_type == ContentType.DEEP_DIVE:
+                twitter_result = self.publishing_service.publish_thread(content)
+            else:
+                twitter_result = self.publishing_service.publish_tweet(content)
             
             if not twitter_result.success:
                 duration = (datetime.now(timezone.utc) - start_time).total_seconds()
@@ -132,7 +145,6 @@ class ContentEngine:
                 result_summary
             )
             
-            # Also send content notification
             await self.telegram_notifier.notify_content_published(
                 content_type=request.content_type.value,
                 theme=content.theme,
@@ -197,12 +209,14 @@ class ContentEngine:
                     self.logger.error("CommentaryGenerator not available")
                     return None
                 return await self.commentary_generator.generate(request)
+
             elif request.content_type == ContentType.DEEP_DIVE:
-                # TODO: Implement DeepDiveGenerator
-                self.logger.warning("DeepDiveGenerator not yet implemented")
-                return None
+                if not self.deep_dive_generator:
+                    self.logger.error("DeepDiveGenerator not available")
+                    return None
+                return await self.deep_dive_generator.generate(request)
+
             elif request.content_type == ContentType.BRIEFING:
-                # TODO: Implement BriefingGenerator
                 self.logger.warning("BriefingGenerator not yet implemented")
                 return None
             else:
@@ -278,6 +292,17 @@ class ContentEngine:
         )
         
         return await self.generate_and_publish_content(request)
+
+    async def generate_deep_dive_now(self, category: Optional[ContentCategory] = None) -> Dict[str, Any]:
+        """
+        Convenience method to generate and publish a deep dive immediately.
+        """
+        request = ContentRequest(
+            content_type=ContentType.DEEP_DIVE,
+            category=category,
+            include_market_data=True
+        )
+        return await self.generate_and_publish_content(request)
     
     async def get_pipeline_status(self) -> Dict[str, Any]:
         """
@@ -290,54 +315,26 @@ class ContentEngine:
             # Check service health
             twitter_status = self.publishing_service.get_client_status()
             
-            # Notion status with error handling
             try:
                 notion_status = self.notion_publisher.get_client_status()
             except Exception as e:
                 notion_status = {"status": "error", "error": str(e)}
             
-            # Telegram status with error handling  
             try:
                 telegram_status = self.telegram_notifier.get_status()
             except Exception as e:
                 telegram_status = {"status": "error", "error": str(e)}
             
             # Test database connection
+            db_status = {"status": "unknown"}
             try:
-                # Simple test - try to use the database service
-                # This will test if the service is working without assuming internal methods
-                test_passed = True
-                headline_count = "N/A"
-                theme_count = "N/A"
-                
-                # Try to test the connection by calling a method that should exist
-                try:
-                    # Most database services have some kind of connection test
-                    # Let's just try to access the connection_string attribute
-                    if hasattr(self.database_service, 'connection_string'):
-                        connection_info = self.database_service.connection_string
-                        test_passed = True
-                    elif hasattr(self.database_service, 'db_config'):
-                        connection_info = str(self.database_service.db_config)
-                        test_passed = True
-                    else:
-                        test_passed = True  # Assume it's working if it initialized
-                except Exception:
-                    test_passed = False
-                
-                if test_passed:
-                    db_status = {
-                        "status": "healthy",
-                        "headline_count": headline_count,
-                        "theme_count": theme_count,
-                        "connection": "active"
-                    }
+                if await self.database_service.test_connection():
+                    db_status = {"status": "healthy"}
                 else:
-                    db_status = {"status": "degraded", "error": "Connection test failed"}
-                    
+                    db_status = {"status": "unhealthy", "error": "Connection test failed"}
             except Exception as e:
                 db_status = {"status": "unhealthy", "error": str(e)}
-            
+
             # Test market service
             try:
                 test_prices = await self.market_client.get_bulk_prices(["SPY"])
@@ -354,20 +351,12 @@ class ContentEngine:
                     "database": db_status,
                     "market_data": market_status,
                     "twitter": twitter_status,
-                    "notion": {
-                        "status": "healthy" if notion_status.get('client_initialized') else "unhealthy",
-                        "client_initialized": notion_status.get('client_initialized', False),
-                        "database_configured": notion_status.get('database_id_configured', False)
-                    },
-                    "telegram": {
-                        "status": "healthy" if telegram_status.get('enabled') else "unhealthy", 
-                        "enabled": telegram_status.get('enabled', False),
-                        "bot_configured": telegram_status.get('bot_configured', False)
-                    }
+                    "notion": notion_status,
+                    "telegram": telegram_status
                 },
                 "generators": {
-                    "commentary": "active",
-                    "deep_dive": "pending_implementation",
+                    "commentary": "active" if self.commentary_generator else "inactive",
+                    "deep_dive": "active" if self.deep_dive_generator else "inactive",
                     "briefing": "pending_implementation"
                 }
             }
@@ -380,52 +369,62 @@ class ContentEngine:
                 "status": "unhealthy"
             }
 
-
-# Convenience functions for easy integration
 async def publish_commentary_now(category: Optional[str] = None) -> Dict[str, Any]:
     """
     Quick function to generate and publish commentary.
-    
-    Args:
-        category: Optional category string ('macro', 'equity', 'political')
-    
-    Returns:
-        Complete pipeline results
     """
     engine = ContentEngine()
-    
-    # Convert string category to enum
     category_enum = None
     if category:
         try:
-            category_enum = ContentCategory(category.upper())
-        except ValueError:
-            logging.warning(f"Unknown category '{category}', using None")
+            category_enum = ContentCategory[category.upper()]
+        except KeyError:
+            logging.warning(f"Unknown category '{category}', proceeding without category filter.")
     
     return await engine.generate_commentary_now(category_enum)
 
+async def publish_deep_dive_now(category: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Quick function to generate and publish a deep dive.
+    """
+    engine = ContentEngine()
+    category_enum = None
+    if category:
+        try:
+            category_enum = ContentCategory[category.upper()]
+        except KeyError:
+            logging.warning(f"Unknown category '{category}', proceeding without category filter.")
+
+    return await engine.generate_deep_dive_now(category_enum)
 
 async def get_system_health() -> Dict[str, Any]:
     """Get complete system health status"""
     engine = ContentEngine()
     return await engine.get_pipeline_status()
 
-
 # Example usage for testing
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
     async def test_content_engine():
         """Test the complete content engine"""
         print("🧪 Testing ContentEngine...")
         
-        # Get pipeline status first
         engine = ContentEngine()
-        status = await engine.get_pipeline_status()
-        print(f"Pipeline Status: {status}")
         
-        # Test commentary generation (uncomment when ready to post)
-        # print("\n📢 Generating commentary...")
-        # result = await engine.generate_commentary_now()
-        # print(f"Result: {result}")
+        print("\n📊 Getting pipeline status...")
+        status = await engine.get_pipeline_status()
+        import json
+        print(json.dumps(status, indent=2))
+        
+        # --- Example: Generate and publish a deep dive ---
+        # print("\n\n🚀 Testing Deep Dive Generation (Equity)...")
+        # result_deep_dive = await publish_deep_dive_now(category="equity")
+        # print(json.dumps(result_deep_dive, indent=2))
+        
+        # --- Example: Generate and publish commentary ---
+        # print("\n\n💬 Testing Commentary Generation (Macro)...")
+        # result_commentary = await publish_commentary_now(category="macro")
+        # print(json.dumps(result_commentary, indent=2))
     
-    # Run the test
     asyncio.run(test_content_engine())
