@@ -1,13 +1,15 @@
 # hedgefund_agent/scheduler.py
 """
-HedgeFund Agent Production Scheduler - FIXED VERSION
+HedgeFund Agent Production Scheduler - WITH HTTP SERVER
 Implements the complete 15-tweet weekday schedule with automatic BST/GMT handling
++ PostgreSQL HTTP news server for website integration
 """
 
 import schedule
 import time
 import logging
 import asyncio
+import threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -34,13 +36,27 @@ except ImportError as e:
     logger.error(f"❌ Failed to import HeadlinePipeline from services: {e}")
     HEADLINE_PIPELINE_AVAILABLE = False
 
+# Import HTTP server
+try:
+    from hedgefund_http_server import start_hedgefund_news_server
+    HTTP_SERVER_AVAILABLE = True
+    logger.info("✅ HTTP News Server imported successfully")
+except ImportError as e:
+    logger.error(f"❌ Failed to import HTTP News Server: {e}")
+    HTTP_SERVER_AVAILABLE = False
+
 class HedgeFundScheduler:
-    """Production scheduler for HedgeFund Agent with BST/GMT awareness"""
+    """Production scheduler for HedgeFund Agent with BST/GMT awareness + HTTP Server"""
     
     def __init__(self):
         self.content_engine = ContentEngine()
         self.telegram = TelegramNotifier()
         self.deep_dive_days = ["Monday", "Wednesday", "Friday"]
+        
+        # HTTP Server management
+        self.http_server_thread = None
+        self.http_server_port = 3002
+        self.http_server_status = "stopped"
         
         # Initialize headline pipeline (modern services version only)
         self.headline_pipeline = None
@@ -73,17 +89,15 @@ class HedgeFundScheduler:
         
         logger.info("🗓️ HedgeFund Scheduler initialized")
         logger.info(f"💓 Heartbeat interval: {self.heartbeat_interval/60:.0f} minutes")
+        logger.info(f"🌐 HTTP Server will run on port {self.http_server_port}")
     
     def _calculate_bst_status(self) -> bool:
         """Calculate if British Summer Time is currently active - called once"""
-        # Simple and reliable: August is definitely BST
-        # You can manually override this or use a more complex calculation later
         now = datetime.now()
         month = now.month
         day = now.day
         
         # BST typically runs from late March to late October
-        # Simple approximation for now
         if month < 3 or month > 10:
             return False
         elif month > 3 and month < 10:
@@ -103,7 +117,6 @@ class HedgeFundScheduler:
         """Get current timezone information"""
         local_time = datetime.now()
         utc_time = datetime.now(timezone.utc)
-        
         return local_time, utc_time
     
     def bst_to_utc(self, bst_time: str) -> str:
@@ -116,6 +129,111 @@ class HedgeFundScheduler:
         else:
             # GMT is UTC+0, no conversion needed
             return bst_time
+    
+    def start_http_server(self):
+        """Start HTTP server in background thread"""
+        if not HTTP_SERVER_AVAILABLE:
+            logger.error("❌ HTTP server not available - import failed")
+            asyncio.run(self.telegram.send_message(
+                "🌐 **HTTP Server Startup Failed**\n❌ Import error - check hedgefund_http_server.py",
+                NotificationLevel.ERROR
+            ))
+            return False
+        
+        try:
+            logger.info(f"🌐 Starting HTTP server on port {self.http_server_port}...")
+            
+            # Start server in daemon thread
+            self.http_server_thread = threading.Thread(
+                target=self._run_http_server,
+                daemon=True,
+                name="HedgeFundHTTPServer"
+            )
+            self.http_server_thread.start()
+            
+            # Wait a moment for server to start
+            time.sleep(2)
+            
+            # Test if server is responding
+            if self._test_http_server():
+                self.http_server_status = "running"
+                logger.info("✅ HTTP server started successfully")
+                
+                asyncio.run(self.telegram.send_message(
+                    f"🌐 **HTTP News Server Started**\n✅ Port: {self.http_server_port}\n📡 Endpoint: /hedgefund-news-data\n💾 Source: PostgreSQL database",
+                    NotificationLevel.SUCCESS
+                ))
+                return True
+            else:
+                self.http_server_status = "failed"
+                logger.error("❌ HTTP server failed to respond")
+                
+                asyncio.run(self.telegram.send_message(
+                    f"🌐 **HTTP Server Health Check Failed**\n❌ Server not responding on port {self.http_server_port}",
+                    NotificationLevel.ERROR
+                ))
+                return False
+                
+        except Exception as e:
+            self.http_server_status = "error"
+            logger.error(f"❌ Failed to start HTTP server: {e}")
+            
+            asyncio.run(self.telegram.notify_critical_error(
+                "HTTP Server Startup",
+                str(e),
+                f"Website news integration unavailable on port {self.http_server_port}"
+            ))
+            return False
+    
+    def _run_http_server(self):
+        """Run HTTP server (called in thread)"""
+        try:
+            # This will block in the thread
+            start_hedgefund_news_server(port=self.http_server_port)
+        except Exception as e:
+            logger.error(f"❌ HTTP server thread error: {e}")
+            self.http_server_status = "crashed"
+    
+    def _test_http_server(self) -> bool:
+        """Test if HTTP server is responding"""
+        try:
+            import urllib.request
+            import socket
+            
+            # Set a short timeout
+            socket.setdefaulttimeout(5)
+            
+            # Test health endpoint
+            url = f"http://localhost:{self.http_server_port}/health"
+            with urllib.request.urlopen(url) as response:
+                data = response.read()
+                return response.status == 200
+                
+        except Exception as e:
+            logger.debug(f"HTTP server test failed: {e}")
+            return False
+    
+    def check_http_server_health(self) -> dict:
+        """Check HTTP server health and return status"""
+        if not self.http_server_thread or not self.http_server_thread.is_alive():
+            return {
+                "status": "stopped",
+                "message": "HTTP server thread not running",
+                "healthy": False
+            }
+        
+        if self._test_http_server():
+            return {
+                "status": "healthy",
+                "message": f"HTTP server responding on port {self.http_server_port}",
+                "healthy": True
+            }
+        else:
+            return {
+                "status": "unhealthy", 
+                "message": "HTTP server thread running but not responding",
+                "healthy": False
+            }
     
     def setup_schedule(self):
         """Setup the complete production schedule"""
@@ -165,7 +283,6 @@ class HedgeFundScheduler:
             )
         
         # === WEEKEND SCHEDULE ===
-        # Reduced weekend schedule (11 tweets: 6 commentary + 3 briefings + 2 deep dives)
         weekend_briefings = ["opening", "midday", "close"]  # 3 briefings only
         weekend_commentary_times = utc_commentary_times[:6]  # 6 commentary posts only
         
@@ -197,13 +314,20 @@ class HedgeFundScheduler:
         # === MAINTENANCE TASKS ===
         if HEADLINE_PIPELINE_AVAILABLE and self.headline_pipeline:
             # Fetch headlines every 30 minutes using modern pipeline
-            # Note: These create recurring jobs, not individual jobs for each time
             schedule.every().hour.at(":05").do(
                 self._safe_job_wrapper("headlines_fetch_05", self._run_headline_pipeline)
             )
             schedule.every().hour.at(":35").do(
                 self._safe_job_wrapper("headlines_fetch_35", self._run_headline_pipeline)
             )
+        
+        # HTTP Server health check every 30 minutes
+        schedule.every().hour.at(":15").do(
+            self._safe_job_wrapper("http_server_health_15", self._check_http_server_health_job)
+        )
+        schedule.every().hour.at(":45").do(
+            self._safe_job_wrapper("http_server_health_45", self._check_http_server_health_job)
+        )
         
         # Daily maintenance at 23:50 UTC (recurring)
         schedule.every().day.at("23:50").do(
@@ -215,105 +339,26 @@ class HedgeFundScheduler:
             self._safe_job_wrapper("heartbeat", self._send_heartbeat)
         )
         
-        # Log schedule summary with detailed breakdown
+        # Log schedule summary
         total_jobs = len(schedule.get_jobs())
-        jobs_by_type = self._analyze_schedule()
-        
         logger.info(f"📋 Schedule loaded: {total_jobs} total jobs")
-        logger.info(f"📊 Jobs breakdown: {jobs_by_type}")
-        
-        # Debug: Show all job details if count seems too high OR if categorization fails
-        if total_jobs > 50 or sum(jobs_by_type.values()) < total_jobs / 2:
-            logger.warning(f"⚠️ Job analysis issue detected. Showing first 10 jobs:")
-            for i, job in enumerate(schedule.get_jobs()[:10]):  # Show first 10 jobs
-                logger.info(f"   Job {i+1}: {job}")
-                logger.debug(f"     Function: {job.job_func}")
-                logger.debug(f"     Function name: {getattr(job.job_func, '__name__', 'unknown')}")
-            if total_jobs > 10:
-                logger.info(f"   ... and {total_jobs - 10} more jobs")
-        
-        # Show headline pipeline status
-        if HEADLINE_PIPELINE_AVAILABLE and self.headline_pipeline:
-            logger.info("📰 Headlines: Modern pipeline with database integration - every 30min at :05 and :35")
-        else:
-            logger.warning("📰 Headlines: Pipeline not available - headline jobs will fail")
         
         # Show next job
         next_job = schedule.next_run()
         if next_job:
             logger.info(f"⏰ Next job: {next_job}")
         
-        # Log timezone info once
+        # Log timezone info
         local_time, utc_time = self.get_timezone_info()
         logger.info("🕐 VM Timezone Information:")
         logger.info(f"Local Time: {local_time.strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info(f"UTC Time: {utc_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
-        if abs((local_time - utc_time.replace(tzinfo=None)).total_seconds()) < 60:
-            logger.info("✅ VM is on UTC timezone")
-        
-        # Log BST status once
+        # Log BST status
         if self.is_bst_active():
-            logger.info("🕐 BST Status: Active")
-            logger.info("✅ Schedule configured for BST (UTC+1)")
+            logger.info("🕐 BST Status: Active - Schedule configured for BST (UTC+1)")
         else:
-            logger.info("🕐 GMT Status: Active") 
-            logger.info("✅ Schedule configured for GMT (UTC+0)")
-        
-        # Log expected tweets
-        today = datetime.now().strftime("%A")
-        expected_tweets = 11 if today in ["Saturday", "Sunday"] else 15
-        logger.info(f"📊 Daily: 9 commentary + 4 briefings + 3 deep dives = {expected_tweets} tweets")
-        logger.info("📰 Headlines fetched every 30min: :05 and :35 past each hour, 7 days/week")
-    
-    def _analyze_schedule(self) -> dict:
-        """Analyze loaded schedule and return breakdown"""
-        jobs = schedule.get_jobs()
-        breakdown = {
-            'commentary': 0,
-            'briefings': 0, 
-            'deep_dives': 0,
-            'headlines': 0,
-            'maintenance': 0,
-            'unknown': 0
-        }
-        
-        for job in jobs:
-            # Try to get category from wrapper attributes first
-            if hasattr(job.job_func, '_job_category'):
-                category = job.job_func._job_category
-                if category in breakdown:
-                    breakdown[category] += 1
-                    continue
-            
-            # Fallback to string analysis
-            job_str = str(job).lower()
-            func_name = getattr(job.job_func, '__name__', 'unknown').lower()
-            
-            categorized = False
-            
-            if 'commentary' in job_str or 'commentary' in func_name:
-                breakdown['commentary'] += 1
-                categorized = True
-            elif 'briefing' in job_str or 'briefing' in func_name:
-                breakdown['briefings'] += 1
-                categorized = True
-            elif 'deep_dive' in job_str or 'deep_dive' in func_name:
-                breakdown['deep_dives'] += 1
-                categorized = True
-            elif 'headlines' in job_str or 'headlines' in func_name:
-                breakdown['headlines'] += 1
-                categorized = True
-            elif ('maintenance' in job_str or 'heartbeat' in job_str or 
-                  'maintenance' in func_name or 'heartbeat' in func_name):
-                breakdown['maintenance'] += 1
-                categorized = True
-            
-            if not categorized:
-                breakdown['unknown'] += 1
-                logger.debug(f"Unknown job: {job_str} (func: {func_name})")
-        
-        return breakdown
+            logger.info("🕐 GMT Status: Active - Schedule configured for GMT (UTC+0)")
     
     def _safe_job_wrapper(self, job_name: str, func, *args, **kwargs):
         """Safe wrapper for all scheduled jobs with proper error handling"""
@@ -374,32 +419,14 @@ class HedgeFundScheduler:
         # Store job name as an attribute for analysis
         wrapper.__name__ = f"wrapper_{job_name}"
         wrapper._job_name = job_name
-        wrapper._job_category = self._categorize_job_name(job_name)
         
         return wrapper
-    
-    def _categorize_job_name(self, job_name: str) -> str:
-        """Categorize job by name for analysis"""
-        job_name_lower = job_name.lower()
-        
-        if 'commentary' in job_name_lower:
-            return 'commentary'
-        elif 'briefing' in job_name_lower:
-            return 'briefings'
-        elif 'deep_dive' in job_name_lower:
-            return 'deep_dives'
-        elif 'headlines' in job_name_lower:
-            return 'headlines'
-        elif 'maintenance' in job_name_lower or 'heartbeat' in job_name_lower:
-            return 'maintenance'
-        else:
-            return 'unknown'
     
     async def _run_briefing(self, briefing_type: str):
         """Generate and publish market briefing"""
         request = ContentRequest(
             content_type=ContentType.BRIEFING,
-            category=ContentCategory.MACRO,  # Use MACRO for market briefings
+            category=ContentCategory.MACRO,
             include_market_data=True
         )
         
@@ -414,7 +441,7 @@ class HedgeFundScheduler:
             return {"success": False, "error": result.get('error')}
     
     async def _run_commentary(self):
-        """Generate and publish market commentary using convenience function"""
+        """Generate and publish market commentary"""
         try:
             # Use the convenience function from content_engine
             from core.content_engine import publish_commentary_now
@@ -435,8 +462,8 @@ class HedgeFundScheduler:
     async def _run_deep_dive(self):
         """Generate and publish deep dive thread"""
         request = ContentRequest(
-            content_type=ContentType.DEEP_DIVE,  # Use DEEP_DIVE not THREAD
-            category=ContentCategory.MACRO,  # Use MACRO for deep dives
+            content_type=ContentType.DEEP_DIVE,
+            category=ContentCategory.MACRO,
             include_market_data=True
         )
         
@@ -456,13 +483,35 @@ class HedgeFundScheduler:
             if not self.headline_pipeline:
                 raise Exception("HeadlinePipeline not available")
             
-            # Use modern services version with database integration
             headlines_stored = self.headline_pipeline.run_pipeline()
             logger.info(f"📰 Headlines pipeline completed: {headlines_stored} headlines stored to database")
             return {"success": True, "headlines_stored": headlines_stored}
                 
         except Exception as e:
             logger.error(f"❌ Headlines pipeline failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _check_http_server_health_job(self):
+        """Scheduled job to check HTTP server health"""
+        try:
+            health_status = self.check_http_server_health()
+            
+            if health_status['healthy']:
+                logger.info("✅ HTTP server health check passed")
+                return {"success": True, "status": health_status['status']}
+            else:
+                logger.warning(f"⚠️ HTTP server health check failed: {health_status['message']}")
+                
+                # Send notification for unhealthy server
+                asyncio.run(self.telegram.send_message(
+                    f"🌐 **HTTP Server Health Alert**\n⚠️ Status: {health_status['status']}\n📝 {health_status['message']}\n🔧 Website news may be unavailable",
+                    NotificationLevel.WARNING
+                ))
+                
+                return {"success": False, "status": health_status['status'], "error": health_status['message']}
+                
+        except Exception as e:
+            logger.error(f"❌ HTTP server health check error: {e}")
             return {"success": False, "error": str(e)}
     
     async def _send_heartbeat(self):
@@ -493,6 +542,10 @@ class HedgeFundScheduler:
             except Exception:
                 health_summary = "❓ Unknown"
             
+            # Get HTTP server status
+            http_status = self.check_http_server_health()
+            http_summary = "✅ Healthy" if http_status['healthy'] else f"⚠️ {http_status['status']}"
+            
             # Create heartbeat message
             heartbeat_msg = f"""💓 **HedgeFund Scheduler Heartbeat**
 
@@ -510,7 +563,8 @@ class HedgeFundScheduler:
    • BST active: {self.is_bst_active()}
    • Last job: {self.last_job_name or 'None'} at {self.last_job_time.strftime('%H:%M') if self.last_job_time else 'N/A'}
 
-🔧 **System Health**: {health_summary}"""
+🔧 **System Health**: {health_summary}
+🌐 **HTTP Server**: {http_summary} (Port {self.http_server_port})"""
             
             await self.telegram.send_message(heartbeat_msg, NotificationLevel.HEARTBEAT)
             logger.info("💓 Heartbeat sent successfully")
@@ -543,12 +597,21 @@ class HedgeFundScheduler:
             # Check system health
             status = await self.content_engine.get_pipeline_status()
             
+            # Check HTTP server health
+            http_status = self.check_http_server_health()
+            
             if status.get('error') or status.get('status') == 'unhealthy':
                 # Use critical_error for health issues
                 await self.telegram.notify_critical_error(
                     "Daily Health Check",
                     f"System health check failed: {status.get('error', 'Unknown error')}",
                     "Check system components and restart if needed"
+                )
+            elif not http_status['healthy']:
+                # HTTP server issues
+                await self.telegram.send_message(
+                    f"🔧 **Daily Maintenance Alert**\n⚠️ HTTP Server: {http_status['status']}\n📝 {http_status['message']}\n🌐 Website news may be affected",
+                    NotificationLevel.WARNING
                 )
             else:
                 # Create daily summary
@@ -561,6 +624,7 @@ class HedgeFundScheduler:
    • Success rate: {(self.jobs_completed_today/(max(self.jobs_completed_today+self.jobs_failed_today,1)))*100:.1f}%
 
 ✅ **System Status**: All systems healthy
+🌐 **HTTP Server**: {http_status['status']} (Port {self.http_server_port})
 🕐 **BST Active**: {self.is_bst_active()}
 ⏰ **Uptime**: {((datetime.now(timezone.utc) - self.startup_time).total_seconds()/3600):.1f}h"""
                 
@@ -576,23 +640,12 @@ class HedgeFundScheduler:
                 "Manual maintenance check required"
             )
     
-    async def _send_daily_summary(self):
-        """Send daily summary"""
-        try:
-            today = datetime.now().strftime("%A")
-            expected_tweets = 11 if today in ["Saturday", "Sunday"] else 15
-            
-            await self.telegram.send_message(
-                f"📊 Daily Summary - {today}\nExpected tweets: {expected_tweets}\nStatus: Scheduler running",
-                NotificationLevel.INFO
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Daily summary failed: {e}")
-    
     def start_scheduler(self):
         """Start the scheduler loop with proper error handling and heartbeat"""
-        logger.info("🚀 Starting HedgeFund Agent Scheduler")
+        logger.info("🚀 Starting HedgeFund Agent Scheduler with HTTP Server")
+        
+        # Start HTTP server first
+        http_started = self.start_http_server()
         
         # Send startup notification using send_message
         try:
@@ -603,6 +656,9 @@ class HedgeFundScheduler:
 🕐 **BST Active**: {self.is_bst_active()}
 💓 **Heartbeat**: Every {self.heartbeat_interval/60:.0f} minutes
 📊 **Jobs Loaded**: {len(schedule.get_jobs())} total scheduled jobs
+
+🌐 **HTTP Server**: {'✅ Running' if http_started else '❌ Failed'} (Port {self.http_server_port})
+📡 **Website Integration**: {'Enabled' if http_started else 'Disabled'}
 
 🎯 **Ready to generate content!**"""
             
@@ -632,12 +688,14 @@ class HedgeFundScheduler:
             except KeyboardInterrupt:
                 logger.info("👋 Scheduler stopped by user")
                 try:
+                    http_status = self.check_http_server_health()
                     shutdown_msg = f"""👋 **HedgeFund Agent Scheduler Stopped**
 
 📅 **Time**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
 🛑 **Reason**: Manual shutdown (Ctrl+C)
 ⏰ **Final Uptime**: {((datetime.now(timezone.utc) - self.startup_time).total_seconds()/3600):.1f}h
 📊 **Today's Stats**: {self.jobs_completed_today} completed, {self.jobs_failed_today} failed
+🌐 **HTTP Server**: {http_status['status']} at shutdown
 
 ✅ **Shutdown clean**"""
                     
