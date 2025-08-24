@@ -15,6 +15,16 @@ from config.settings import (
     AZURE_RESOURCE_NAME
 )
 
+try:
+    from core.models import ContentCategory
+except ImportError:
+    # Fallback if models not available
+    from enum import Enum
+    class ContentCategory(Enum):
+        MACRO = "macro"
+        EQUITY = "equity"
+        POLITICAL = "political"
+
 logger = logging.getLogger(__name__)
 
 class GPTService:
@@ -135,3 +145,141 @@ class GPTService:
         except Exception as e:
             logger.error(f"GPT thread generation failed: {e}")
             return []
+    
+    # ========================================
+    # NEW: INSTITUTIONAL COMMENT GENERATION
+    # ========================================
+    
+    def generate_institutional_comment(self, headline: str, category: str) -> str:
+        """
+        Generate HTD Research institutional commentary for hedge fund news
+        
+        Args:
+            headline: The news headline to comment on
+            category: Category (macro, equity, political)
+            
+        Returns:
+            Professional institutional comment with HTD Research branding
+        """
+        try:
+            # Map category string to enum if needed
+            category_enum = self._map_category_string(category)
+            
+            # Build institutional prompt
+            prompt = self._build_institutional_prompt(headline, category_enum)
+            
+            # Generate comment using existing generate_text method
+            comment = self.generate_text(prompt, max_tokens=100, temperature=0.7)
+            
+            # Clean and format for institutional use
+            formatted_comment = self._format_institutional_comment(comment)
+            
+            logger.info(f"✅ Generated institutional comment for {category} headline")
+            return formatted_comment
+            
+        except Exception as e:
+            logger.error(f"❌ Institutional comment generation failed: {e}")
+            return self._get_institutional_fallback(category)
+    
+    def _build_institutional_prompt(self, headline: str, category: ContentCategory) -> str:
+        """Build category-specific institutional prompts"""
+        
+        base_instruction = (
+            "As HTD Research, provide sharp institutional analysis. "
+            "Use professional terminology. Keep under 120 characters total. "
+            "Be analytical and show market expertise."
+        )
+        
+        category_prompts = {
+            ContentCategory.MACRO: f"""
+            {base_instruction}
+            
+            Focus on: policy implications, market structure impacts, duration/credit risk, 
+            institutional positioning opportunities.
+            
+            Headline: {headline}
+            Category: Macro/Economic
+            
+            Institutional Analysis:
+            """,
+            
+            ContentCategory.EQUITY: f"""
+            {base_instruction}
+            
+            Focus on: sector implications, alpha opportunities, earnings impact, 
+            institutional flow implications, risk-adjusted positioning.
+            
+            Headline: {headline} 
+            Category: Equity/Corporate
+            
+            Institutional Analysis:
+            """,
+            
+            ContentCategory.POLITICAL: f"""
+            {base_instruction}
+            
+            Focus on: policy market impact, regulatory implications, sector rotation,
+            risk-off/risk-on positioning. Stay objective and institutional.
+            
+            Headline: {headline}
+            Category: Political/Policy  
+            
+            Institutional Analysis:
+            """
+        }
+        
+        return category_prompts.get(category, category_prompts[ContentCategory.MACRO])
+    
+    def _format_institutional_comment(self, raw_comment: str) -> str:
+        """Format and clean institutional commentary"""
+        if not raw_comment:
+            return self._get_institutional_fallback("macro")
+            
+        # Clean the comment
+        comment = raw_comment.strip()
+        
+        # Remove any casual language that might slip through
+        professional_replacements = {
+            "I think": "Analysis suggests",
+            "I believe": "Research indicates",
+            "guys": "market participants", 
+            "folks": "investors",
+            "gonna": "will",
+            "can't": "cannot"
+        }
+        
+        for casual, professional in professional_replacements.items():
+            comment = comment.replace(casual, professional)
+        
+        # Ensure HTD Research branding (institutional style)
+        if "HTD Research" not in comment and "— HTD" not in comment:
+            # Add signature without brain emoji for institutional feel
+            comment += " — HTD Research 📊"
+        
+        # Ensure reasonable length
+        if len(comment) > 140:
+            comment = comment[:137] + "..."
+            
+        return comment
+    
+    def _map_category_string(self, category: str) -> ContentCategory:
+        """Map category string to ContentCategory enum"""
+        category_mapping = {
+            'macro': ContentCategory.MACRO,
+            'equity': ContentCategory.EQUITY, 
+            'political': ContentCategory.POLITICAL,
+            'general': ContentCategory.MACRO  # Default fallback
+        }
+        
+        return category_mapping.get(category.lower(), ContentCategory.MACRO)
+    
+    def _get_institutional_fallback(self, category: str) -> str:
+        """Professional fallback comments by category"""
+        fallbacks = {
+            'macro': "Fed policy dynamics create asymmetric positioning opportunity. Monitor duration exposure. — HTD Research 📊",
+            'equity': "Earnings revision cycle suggests institutional flow implications. Alpha opportunity developing. — HTD Research 📊",
+            'political': "Policy uncertainty creates tactical positioning window. Regulatory impact assessment ongoing. — HTD Research 📊",
+            'general': "Market structure shift warrants institutional attention. Risk positioning advised. — HTD Research 📊"
+        }
+        
+        return fallbacks.get(category, fallbacks['general'])
