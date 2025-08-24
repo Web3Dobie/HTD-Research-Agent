@@ -11,7 +11,10 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,  # Changed from INFO to DEBUG
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Try to import your services
@@ -186,12 +189,14 @@ class HedgeFundNewsHandler(BaseHTTPRequestHandler):
                     headlines_data = headlines_1hr
                     logger.warning(f"⚠️ Limited data: only {len(headlines_data)} headlines from last hour")
             
-            # Apply rotation logic (unchanged)
+            # Return all headlines for frontend rotation (no server-side rotation)
             if len(headlines_data) > 1:
-                rotated_headlines = self._apply_rotation_logic(headlines_data)
-                logger.info(f"🔄 Applied 5-minute rotation: showing headline {self._get_current_rotation_index(len(headlines_data)) + 1} of {len(headlines_data)}")
+                current_rotation_index = self._get_current_rotation_index(len(headlines_data))
+                logger.info(f"🔄 Found {len(headlines_data)} headlines - returning all to frontend (would be index {current_rotation_index + 1})")
             else:
-                rotated_headlines = headlines_data
+                logger.info(f"🔄 Found {len(headlines_data)} headline - returning to frontend")
+            
+            rotated_headlines = headlines_data  # Return ALL headlines
             
             # Format for website API with enhanced GPT comments
             formatted_headlines = []
