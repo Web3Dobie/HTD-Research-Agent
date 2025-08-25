@@ -2,50 +2,67 @@
 import logging
 import re
 from typing import Optional, List
+from datetime import datetime
 
 # Import services and models from the new architecture
 from core.models import (
     ContentType, ContentCategory, ContentRequest,
     GeneratedContent, Headline, MarketData
 )
-from services.database_service import DatabaseService
-from services.gpt_service import GPTService
-from services.market_client import MarketClient
 
 logger = logging.getLogger(__name__)
 
 class DeepDiveGenerator:
     """Generates multi-part deep dive threads with a hedge fund perspective."""
 
-    def __init__(self, data_service: DatabaseService, gpt_service: GPTService, market_client: MarketClient, config: dict):
+    def __init__(self, data_service, gpt_service, market_client, config):
         """Initializes the generator with dependency injection, same as CommentaryGenerator."""
         self.data_service = data_service
         self.gpt_service = gpt_service
         self.market_client = market_client
         self.config = config
+        
+        # Category rotation tracking (same as CommentaryGenerator)
+        self.last_used_category = None
+        
+        # Category classification keywords (reuse from CommentaryGenerator)
+        self.category_keywords = {
+            ContentCategory.MACRO: [
+                "fed", "federal reserve", "inflation", "gdp", "unemployment", 
+                "recession", "interest rate", "monetary policy", "powell"
+            ],
+            ContentCategory.POLITICAL: [
+                "trump", "biden", "election", "congress", "tariff", 
+                "trade", "sanctions", "policy", "government"
+            ],
+            ContentCategory.EQUITY: [
+                "earnings", "stock", "revenue", "guidance", "merger",
+                "acquisition", "ipo", "dividend", "buyback"
+            ]
+        }
 
     async def generate(self, request: Optional[ContentRequest] = None) -> GeneratedContent:
         """
         Orchestrates the generation of a deep dive thread.
 
         This method follows the same flow as CommentaryGenerator:
-        1.  Get a headline.
-        2.  Determine category and theme.
-        3.  Generate content using GPT.
-        4.  Enrich with market data.
-        5.  Return a structured GeneratedContent object.
+        1. Get a high-scoring headline.
+        2. Determine category and theme.
+        3. Generate thread content using GPT.
+        4. Enrich with market data.
+        5. Return a structured GeneratedContent object.
         """
         try:
             logger.info("📊 Generating hedge fund deep dive thread")
 
-            # 1. Get a suitable headline for the deep dive
-            headline = self.data_service.get_unused_headline_today(min_score=8) # Prefer high-score for deep dives
+            # 1. Get a high-scoring headline for the deep dive (FIXED: use new method)
+            headline = self._get_headline_for_content(request)
             if not headline:
-                raise Exception("No suitable high-scoring headline available for a deep dive.")
+                raise Exception("No suitable high-scoring headline available for deep dive")
 
             # 2. Determine category and theme for deduplication
             category = self._determine_category(request, headline)
-            theme = self.data_service.extract_and_validate_theme(headline.headline)
+            theme = self._extract_and_validate_theme(headline.headline)
 
             # 3. Build the prompt and generate the thread using GPTService
             prompt = self._build_deep_dive_prompt(headline, category)
@@ -53,16 +70,18 @@ class DeepDiveGenerator:
             thread_parts = self.gpt_service.generate_thread(prompt, max_parts=3)
 
             if not thread_parts:
-                raise Exception("GPT thread generation failed or returned no parts.")
+                raise Exception("GPT thread generation failed or returned no parts")
 
             # 4. Enrich all thread parts with market data
             enriched_parts, market_data = await self._enrich_with_market_data(thread_parts)
 
-            # 5. Combine parts into a single string for the GeneratedContent object
-            # The PublishingService will handle splitting it for posting.
+            # 5. Add mentions and disclaimer to the last part only
+            enriched_parts = self._finalize_thread_parts(enriched_parts)
+
+            # 6. Combine parts into a single string for the main text field
             final_text = "\n\n---\n\n".join(enriched_parts)
 
-            # 6. Mark headline as used and track the theme
+            # 7. Mark headline as used and track the theme
             self.data_service.mark_headline_used(headline.id, "deep_dive")
             self.data_service.track_theme(theme)
 
@@ -75,13 +94,20 @@ class DeepDiveGenerator:
                 theme=theme,
                 market_data=market_data,
                 headline_used=headline,
-                # Store the individual parts for potential use by the publisher
-                parts=enriched_parts
+                parts=enriched_parts  # Store individual parts for thread posting
             )
 
         except Exception as e:
             logger.error(f"❌ Deep dive generation failed: {e}")
             raise
+
+    def _get_headline_for_content(self, request: Optional[ContentRequest]) -> Optional[Headline]:
+        """Get top scoring unused headline for deep dive (FIXED: use new method)"""
+        if request and request.specific_headline:
+            return request.specific_headline
+            
+        # Get top scoring unused headline with min_score=9 for deep dives
+        return self.data_service.get_top_unused_headline_today(min_score=9)
 
     def _build_deep_dive_prompt(self, headline: Headline, category: ContentCategory) -> str:
         """Builds a GPT prompt for a deep dive thread, adapted from old script."""
@@ -111,52 +137,172 @@ class DeepDiveGenerator:
         Finds all unique cashtags across all thread parts, fetches their market data,
         and replaces the cashtags with enriched data in each part.
         """
-        # Extract all unique cashtags from the entire thread to make one bulk API call
+        # Extract all unique cashtags from the entire thread
         all_cashtags = set()
         for part in parts:
-            cashtags_in_part = re.findall(r'\$[A-Z]{1,5}\b', part)
-            for tag in cashtags_in_part:
-                all_cashtags.add(tag)
+            cashtags_in_part = self._extract_cashtags(part)
+            all_cashtags.update(cashtags_in_part)
 
-        valid_tickers = [tag.strip("$") for tag in all_cashtags if len(tag) > 1 and tag[1:].isalpha()]
+        # Filter to valid tickers
+        valid_tickers = [tag.strip("$") for tag in all_cashtags if self._is_valid_ticker(tag.strip("$"))]
+        
         if not valid_tickers:
+            logger.info("📊 No valid tickers found in thread parts")
             return parts, []
 
         logger.info(f"💰 Enriching deep dive with market data for: {valid_tickers}")
-        market_data_map = await self.market_client.get_bulk_prices(valid_tickers)
-        market_data_objects = [md for md in market_data_map.values()]
+        
+        # Get market data for all tickers in bulk
+        market_data_objects = []
+        prices = {}
+        
+        try:
+            # Use bulk price endpoint
+            bulk_prices = await self.market_client.get_bulk_prices(valid_tickers)
+            
+            for ticker, data in bulk_prices.items():
+                if data and data.price > 0:
+                    prices[f"${ticker}"] = data
+                    market_data_objects.append(data)
+                    
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to get bulk prices: {e}")
+            # Try individual prices as fallback
+            for ticker in valid_tickers:
+                try:
+                    price_data = await self.market_client.get_price(ticker)
+                    if price_data and price_data.price > 0:
+                        prices[f"${ticker}"] = price_data
+                        market_data_objects.append(price_data)
+                except Exception as e:
+                    logger.warning(f"❌ Failed to get price for {ticker}: {e}")
+                    continue
 
-        # Replace cashtags in each part with the fetched data
+        # Replace cashtags in each part with enriched format
         enriched_parts = []
         for part in parts:
             enriched_part = part
-            for ticker, data in market_data_map.items():
-                cashtag = f"${ticker}"
+            for cashtag, data in prices.items():
                 if data:
                     enriched_format = f"{cashtag} (${data.price:.2f}, {data.change_percent:+.2f}%)"
                     # Use regex for safe replacement (whole word only)
-                    pattern = rf"\${ticker}(?=\s|$|[^\w])"
-                    enriched_part = re.sub(pattern, enriched_format, enriched_part, flags=re.IGNORECASE)
+                    pattern = rf"{re.escape(cashtag)}(?=\s|$|[^\w])"
+                    enriched_part = re.sub(pattern, enriched_format, enriched_part)
             enriched_parts.append(enriched_part)
 
+        logger.info(f"✅ Successfully enriched {len(market_data_objects)} tickers in deep dive")
         return enriched_parts, market_data_objects
+
+    def _extract_cashtags(self, text: str) -> List[str]:
+        """Extract cashtags from text"""
+        pattern = r'\$[A-Z]{1,5}\b'
+        return re.findall(pattern, text, re.IGNORECASE)
+
+    def _is_valid_ticker(self, ticker: str) -> bool:
+        """Basic ticker validation"""
+        return (len(ticker) >= 1 and len(ticker) <= 5 and 
+                ticker.isalpha() and ticker.isupper())
+
+    def _finalize_thread_parts(self, parts: List[str]) -> List[str]:
+        """Add mentions and disclaimer to thread parts (only disclaimer on last part)"""
+        finalized_parts = []
+        
+        for i, part in enumerate(parts):
+            # Add mentions to each part (placeholder - implement as needed)
+            finalized_part = part
+            
+            # Add disclaimer only to the last part
+            if i == len(parts) - 1:
+                # Clean any existing disclaimers first
+                finalized_part = re.sub(
+                    r"This is my opinion\.? ?Not financial advice\.?",
+                    "",
+                    finalized_part,
+                    flags=re.IGNORECASE
+                ).strip()
+                
+                # Add disclaimer
+                disclaimer = self.config.get('default_disclaimer', "This is my opinion. Not financial advice.")
+                finalized_part += f"\n\n{disclaimer}"
+            
+            finalized_parts.append(finalized_part)
+        
+        return finalized_parts
 
     def _determine_category(self, request: Optional[ContentRequest], headline: Headline) -> ContentCategory:
         """
-        Determines the content category.
-        This logic is reused from CommentaryGenerator for consistency.
+        Determines the content category (same logic as CommentaryGenerator).
         """
+        # If request specifies category, use it
         if request and request.category:
             return request.category
+            
+        # If headline already has category, convert to enum
         if headline.category:
             try:
                 return ContentCategory(headline.category.lower())
             except ValueError:
                 pass
-        # Fallback to keyword classification
-        headline_lower = headline.headline.lower()
-        if any(kw in headline_lower for kw in ["earnings", "stock", "revenue", "ipo"]):
-            return ContentCategory.EQUITY
-        if any(kw in headline_lower for kw in ["trump", "biden", "election", "congress", "policy"]):
-            return ContentCategory.POLITICAL
-        return ContentCategory.MACRO # Default
+        
+        # Classify based on content using keywords
+        classified = self._classify_headline_content(headline.headline)
+        
+        # Apply category rotation (avoid same category twice in a row)
+        if classified == self.last_used_category:
+            # Rotate to next category
+            categories = list(ContentCategory)
+            current_index = categories.index(classified)
+            next_index = (current_index + 1) % len(categories)
+            selected_category = categories[next_index]
+            logger.info(f"🔄 Category rotated from {classified.value} to {selected_category.value}")
+        else:
+            selected_category = classified
+        
+        self.last_used_category = selected_category
+        return selected_category
+
+    def _classify_headline_content(self, headline: str) -> ContentCategory:
+        """Classify headline using keyword matching (same as CommentaryGenerator)"""
+        headline_lower = headline.lower()
+        
+        # Count keyword matches for each category
+        category_scores = {}
+        for category, keywords in self.category_keywords.items():
+            score = sum(1 for keyword in keywords if keyword in headline_lower)
+            if score > 0:
+                category_scores[category] = score
+        
+        # Return category with highest score, or default to MACRO
+        if category_scores:
+            return max(category_scores, key=category_scores.get)
+        else:
+            return ContentCategory.MACRO
+
+    def _extract_and_validate_theme(self, headline: str) -> str:
+        """Extract and validate theme for deduplication (same as CommentaryGenerator)"""
+        # Extract meaningful words (remove stopwords)
+        stopwords = {"the", "in", "of", "and", "to", "a", "after", "on", "for", "with", "is", "are", "will", "has", "have"}
+        words = headline.split()
+        
+        theme_candidates = []
+        for word in words:
+            word_clean = re.sub(r'[^\w]', '', word.lower())
+            if len(word_clean) > 3 and word_clean not in stopwords:
+                theme_candidates.append(word_clean)
+        
+        # Create theme from first significant word or fallback
+        if theme_candidates:
+            base_theme = theme_candidates[0]
+        else:
+            base_theme = "market_update"
+        
+        # Check for duplicates and modify if needed
+        theme = base_theme
+        is_duplicate = self.data_service.is_duplicate_theme(theme)
+        
+        if is_duplicate:
+            # Add timestamp to make unique
+            theme = f"{base_theme}_{datetime.now().strftime('%H%M')}"
+            logger.info(f"🔄 Theme modified to avoid duplicate: {theme}")
+        
+        return theme

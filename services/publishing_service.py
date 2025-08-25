@@ -136,6 +136,71 @@ class PublishingService:
             error_msg = f"Unexpected error publishing tweet: {e}"
             self.logger.error(f"❌ {error_msg}")
             return TwitterResult(success=False, error=error_msg)
+
+    def publish_thread(self, content: GeneratedContent) -> TwitterResult:
+        """
+        Publish a multi-part thread to Twitter.
+        
+        Args:
+            content: GeneratedContent with parts array for thread
+            
+        Returns:
+            TwitterResult with main tweet details
+        """
+        try:
+            if not self.client:
+                return TwitterResult(success=False, error="Twitter client not initialized")
+            
+            if not content.parts:
+                return TwitterResult(success=False, error="No thread parts to publish")
+            
+            self.logger.info(f"🧵 Publishing {len(content.parts)}-part thread: {content.theme}")
+            
+            # Post the thread
+            thread_tweets = []
+            reply_to_id = None
+            
+            for i, part in enumerate(content.parts):
+                try:
+                    # Post each part as a reply to the previous
+                    response = self.client.create_tweet(
+                        text=part,
+                        in_reply_to_tweet_id=reply_to_id
+                    )
+                    
+                    thread_tweets.append(response)
+                    reply_to_id = response.data['id']  # Next tweet replies to this one
+                    
+                    self.logger.info(f"✅ Posted thread part {i+1}/{len(content.parts)}: {response.data['id']}")
+                    
+                except Exception as e:
+                    self.logger.error(f"❌ Failed to post thread part {i+1}: {e}")
+                    # If first tweet fails, return error. If later tweets fail, continue with partial thread
+                    if i == 0:
+                        return TwitterResult(success=False, error=f"Failed to post thread starter: {e}")
+                    else:
+                        self.logger.warning(f"⚠️ Thread partially posted - {i} of {len(content.parts)} parts successful")
+                        break
+            
+            if not thread_tweets:
+                return TwitterResult(success=False, error="No thread parts were posted successfully")
+            
+            # Return result based on first tweet (main thread)
+            main_tweet = thread_tweets[0]
+            tweet_url = f"https://twitter.com/{self.username}/status/{main_tweet.data['id']}"
+            
+            self.logger.info(f"🎉 Thread published successfully: {tweet_url}")
+            
+            return TwitterResult(
+                success=True,
+                tweet_id=main_tweet.data['id'],
+                url=tweet_url,
+                timestamp=datetime.now(timezone.utc).isoformat()
+            )
+            
+        except Exception as e:
+            self.logger.error(f"❌ Failed to publish thread: {e}")
+            return TwitterResult(success=False, error=str(e))
     
     def publish_text(self, text: str) -> TwitterResult:
         """

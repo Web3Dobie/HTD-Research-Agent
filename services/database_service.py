@@ -354,6 +354,57 @@ class DatabaseService:
             raise
         finally:
             cursor.close()
+
+    def get_top_unused_headline_today(self, min_score: int = 9) -> Optional[Headline]:
+        """
+        Get highest scoring unused headline above minimum threshold.
+        Specifically designed for deep dives that need high-quality headlines.
+        
+        Args:
+            min_score: Minimum score threshold (default 9 for deep dives)
+            
+        Returns:
+            Highest scoring Headline above threshold, or None if none found
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        try:
+            query = """
+                SELECT * FROM hedgefund_agent.headlines 
+                WHERE used = FALSE 
+                AND created_at >= CURRENT_DATE
+                AND score >= %s
+                ORDER BY score DESC LIMIT 1
+            """
+            
+            cursor.execute(query, (min_score,))
+            row = cursor.fetchone()
+            
+            if row:
+                headline = Headline(
+                    id=row['id'],
+                    headline=row['headline'],
+                    summary=row['summary'],
+                    score=row['score'],
+                    category=row['category'],
+                    source=row['source'],
+                    url=row['url'],
+                    used=row['used'],
+                    used_at=row['used_at'],
+                    created_at=row['created_at']
+                )
+                logger.info(f"📋 Found top scoring headline (score: {headline.score}): {headline.headline[:50]}...")
+                return headline
+            else:
+                logger.warning(f"⚠️ No unused headlines found with score >= {min_score}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to get top unused headline: {e}")
+            raise
+        finally:
+            cursor.close()
     
     # === System Logging ===
     

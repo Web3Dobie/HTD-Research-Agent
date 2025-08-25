@@ -296,12 +296,19 @@ class ContentEngine:
     async def generate_deep_dive_now(self, category: Optional[ContentCategory] = None) -> Dict[str, Any]:
         """
         Convenience method to generate and publish a deep dive immediately.
+        
+        Args:
+            category: Optional category filter for headlines
+            
+        Returns:
+            Complete pipeline results
         """
         request = ContentRequest(
             content_type=ContentType.DEEP_DIVE,
             category=category,
             include_market_data=True
         )
+        
         return await self.generate_and_publish_content(request)
     
     async def get_pipeline_status(self) -> Dict[str, Any]:
