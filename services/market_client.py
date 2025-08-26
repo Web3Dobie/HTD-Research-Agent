@@ -26,7 +26,7 @@ class MarketClient:
                 # Correct endpoint: /prices/{symbol}
                 url = f"{self.base_url}/api/v1/prices/{ticker}"
                 
-                async with session.get(url, timeout=10) as response:
+                async with session.get(url, timeout=45) as response:
                     if response.status == 200:
                         data = await response.json()
                         logger.debug(f"💰 Got price for {ticker}: ${data.get('price', 0):.2f}")
@@ -44,14 +44,14 @@ class MarketClient:
         try:
             async with aiohttp.ClientSession() as session:
                 # Use the bulk endpoint: /prices/bulk
-                url = f"{self.base_url}/api/v1prices/bulk"
+                url = f"{self.base_url}/api/v1/prices/bulk"
                 payload = {
                     "symbols": tickers,
                     "include_volume": True,
                     "include_market_cap": False
                 }
                 
-                async with session.post(url, json=payload, timeout=15) as response:
+                async with session.post(url, json=payload, timeout=60) as response:
                     if response.status == 200:
                         data = await response.json()
                         
