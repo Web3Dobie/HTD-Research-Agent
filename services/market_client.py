@@ -24,7 +24,7 @@ class MarketClient:
         try:
             async with aiohttp.ClientSession() as session:
                 # Correct endpoint: /prices/{symbol}
-                url = f"{self.base_url}/prices/{ticker}"
+                url = f"{self.base_url}/api/v1/prices/{ticker}"
                 
                 async with session.get(url, timeout=10) as response:
                     if response.status == 200:
@@ -44,7 +44,7 @@ class MarketClient:
         try:
             async with aiohttp.ClientSession() as session:
                 # Use the bulk endpoint: /prices/bulk
-                url = f"{self.base_url}/prices/bulk"
+                url = f"{self.base_url}/api/v1prices/bulk"
                 payload = {
                     "symbols": tickers,
                     "include_volume": True,
