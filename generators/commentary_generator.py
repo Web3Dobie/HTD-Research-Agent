@@ -486,7 +486,7 @@ class CommentaryGenerator:
         for ticker in cashtags:
             try:
                 # Get market data
-                price_data = await self.market_client.get_price_data(ticker)
+                price_data = await self.market_client.get_price(ticker)
                 
                 if price_data:
                     market_data.append(MarketData(
