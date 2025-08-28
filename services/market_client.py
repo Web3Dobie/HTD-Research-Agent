@@ -19,25 +19,32 @@ class MarketClient:
         self.base_url = MARKET_DATA_SERVICE_URL
         logger.info(f"📈 Market client initialized: {self.base_url}")
     
-    async def get_price(self, ticker: str) -> Optional[Dict]:
-        """Get price data for a single ticker"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Correct endpoint: /prices/{symbol}
-                url = f"{self.base_url}/api/v1/prices/{ticker}"
-                
-                async with session.get(url, timeout=45) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        logger.debug(f"💰 Got price for {ticker}: ${data.get('price', 0):.2f}")
-                        return data
-                    else:
-                        logger.warning(f"⚠️ Market service returned {response.status} for {ticker}")
-                        return None
-                        
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to get price for {ticker}: {e}")
-            return None
+    async def get_price(self, ticker: str, max_retries: int = 2) -> Optional[Dict]:
+        """Get price data with retry logic"""
+        for attempt in range(max_retries + 1):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    url = f"{self.base_url}/api/v1/prices/{ticker}"
+                    async with session.get(url, timeout=45) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            logger.debug(f"Got price for {ticker}: ${data.get('price', 0):.2f}")
+                            return data
+                        elif response.status == 404 and attempt < max_retries:
+                            logger.warning(f"404 for {ticker}, retrying in 2s... (attempt {attempt + 1})")
+                            await asyncio.sleep(2)
+                            continue
+                        else:
+                            logger.warning(f"Market service returned {response.status} for {ticker}")
+                            return None
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(f"Attempt {attempt + 1} failed for {ticker}: {e}, retrying...")
+                    await asyncio.sleep(2)
+                else:
+                    logger.warning(f"All attempts failed for {ticker}: {e}")
+                    return None
+        return None
     
     async def get_bulk_prices(self, tickers: List[str]) -> Dict[str, Dict]:
         """Get prices for multiple tickers using bulk endpoint"""
