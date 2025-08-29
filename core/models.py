@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Optional, List
+from services.market_sentiment_service import SentimentAnalysis
 
 class ContentType(Enum):
     COMMENTARY = "commentary"
@@ -64,3 +65,11 @@ class ContentRequest:
     category: Optional[ContentCategory] = None
     include_market_data: bool = True
     specific_headline: Optional[Headline] = None  # Added this missing attribute
+
+@dataclass
+class BriefingPayload:
+    """A container for all data needed to generate a briefing document."""
+    market_analysis: SentimentAnalysis
+    market_news: List[Dict[str, Any]] = field(default_factory=list)
+    earnings_calendar: List[Dict[str, Any]] = field(default_factory=list)
+    config: Dict[str, Any] = field(default_factory=dict)

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from notion_client import Client
 
-from core.models import GeneratedContent
+from core.models import GeneratedContent, BriefingPayload
 from services.publishing_service import TwitterResult
 from config.settings import NOTION_CONFIG
 
@@ -125,7 +125,8 @@ class NotionPublisher:
     
     async def publish_briefing(self, analysis, config: dict) -> Optional[str]:
         """
-        Creates a rich Notion page for a briefing and returns its public URL.
+        Creates a rich Notion page, then updates it with its own public URL
+        in the 'PDF Link' property for website integration.
         """
         if not self.client:
             self.logger.error("Notion client not available for briefing publish")
@@ -139,27 +140,34 @@ class NotionPublisher:
             return None
         
         try:
+            # Step 1: Create the page with its content and initial properties
             page_properties = {
                 "Name": {"title": [{"text": {"content": config.get('briefing_title')}}]},
                 "Date": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
                 "Sentiment": {"select": {"name": analysis.sentiment.value}}
             }
-            
             page_blocks = self._build_briefing_blocks(analysis)
 
-            # NOTE: Your existing client is synchronous. For an async method,
-            # you would ideally use an async Notion client.
-            # For now, this will work but will block the event loop.
             created_page = self.client.pages.create(
                 parent={"database_id": database_id},
                 properties=page_properties,
                 children=page_blocks
             )
             
+            page_id = created_page["id"]
             page_url = created_page.get("url")
-            self.logger.info(f"✅ Briefing published to Notion: {created_page['id']}")
-            self.logger.info(f"   Title: {config.get('briefing_title')}")
-            self.logger.info(f"   URL: {page_url}")
+            self.logger.info(f"✅ Briefing page created in Notion: {page_id}")
+
+            # Step 2: Update the page with its own URL in the 'PDF Link' property
+            if page_url:
+                await asyncio.sleep(1) # Small delay to ensure the page is ready for an update
+                self.client.pages.update(
+                    page_id=page_id,
+                    properties={
+                        "PDF Link": {"url": page_url} # <-- This is the key change
+                    }
+                )
+                self.logger.info(f"   Updated 'PDF Link' property with public URL: {page_url}")
 
             return page_url
 
