@@ -3,7 +3,8 @@ import psycopg2
 import psycopg2.extras
 import logging
 import json
-from datetime import datetime, timedelta
+import asyncio
+from datetime import datetime, timedelta, time
 from typing import List, Dict, Optional
 
 # Use absolute imports for the core models
@@ -290,6 +291,41 @@ class DatabaseService:
             return False
         finally:
             cursor.close()
+
+    async def get_top_headlines_since_midnight(self, limit: int = 10) -> List[Headline]:
+        """
+        Asynchronously fetches the top N headlines since midnight of the current day.
+        Designed for the morning briefing.
+        """
+        today_midnight = datetime.combine(datetime.now().date(), time.min)
+        logger.info(f"📰 Fetching top {limit} headlines since {today_midnight}")
+
+        try:
+            # Run the synchronous DB call in a separate thread
+            def db_call():
+                conn = self.get_connection()
+                # Use RealDictCursor to get dict-like rows
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                try:
+                    cursor.execute("""
+                        SELECT * FROM hedgefund_agent.headlines
+                        WHERE created_at >= %s
+                        ORDER BY score DESC, created_at DESC
+                        LIMIT %s;
+                    """, (today_midnight, limit))
+                    return cursor.fetchall()
+                finally:
+                    cursor.close()
+
+            rows = await asyncio.to_thread(db_call)
+
+            headlines = [Headline(**row) for row in rows]
+            logger.info(f"✅ Successfully fetched {len(headlines)} headlines for briefing.")
+            return headlines
+
+        except Exception as e:
+            logger.error(f"❌ Database error while fetching briefing headlines: {e}")
+            return []
     
     # === Theme Operations ===
     

@@ -6,6 +6,7 @@ Replaces old utils/fetch_stock_data.py news functions
 
 import logging
 import aiohttp
+import asyncio
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
 
@@ -126,37 +127,48 @@ class NewsClient:
                 # Get both calendars concurrently
                 ipo_url = f"{self.base_url}/api/v1/calendar/ipo"
                 earnings_url = f"{self.base_url}/api/v1/calendar/earnings"
-                params = {"days": days_ahead}
+                # Note: Your calendar endpoints seem to use 'days' not 'days_ahead'
+                params = {"days": days_ahead} 
                 
                 ipo_task = session.get(ipo_url, params=params, timeout=30)
                 earnings_task = session.get(earnings_url, params=params, timeout=30)
                 
-                async with ipo_task as ipo_response, earnings_task as earnings_response:
-                    ipo_events = []
-                    earnings_events = []
-                    
-                    if ipo_response.status == 200:
-                        ipo_data = await ipo_response.json()
-                        ipo_events = ipo_data.get("events", [])
-                        logger.debug(f"Got {len(ipo_events)} IPO events")
-                    else:
-                        logger.warning(f"IPO calendar API returned {ipo_response.status}")
-                    
-                    if earnings_response.status == 200:
-                        earnings_data = await earnings_response.json()
-                        earnings_events = earnings_data.get("events", [])
-                        logger.debug(f"Got {len(earnings_events)} earnings events")
-                    else:
-                        logger.warning(f"Earnings calendar API returned {earnings_response.status}")
-                    
-                        return data
-                    else:
-                        logger.warning(f"Briefing data API returned {response.status}")
-                        return self._empty_briefing_data()
-                        
+                # --- Corrected Logic Starts Here ---
+                ipo_events = []
+                earnings_events = []
+                
+                # Use asyncio.gather to run tasks concurrently for better performance
+                ipo_response, earnings_response = await asyncio.gather(ipo_task, earnings_task)
+
+                # Process IPO Response
+                if ipo_response.status == 200:
+                    ipo_data = await ipo_response.json()
+                    ipo_events = ipo_data.get("ipoCalendar", []) # Changed to 'ipoCalendar'
+                    logger.debug(f"Got {len(ipo_events)} IPO events")
+                else:
+                    logger.warning(f"IPO calendar API returned {ipo_response.status}")
+                
+                # Process Earnings Response
+                if earnings_response.status == 200:
+                    earnings_data = await earnings_response.json()
+                    earnings_events = earnings_data.get("earningsCalendar", []) # Changed to 'earningsCalendar'
+                    logger.debug(f"Got {len(earnings_events)} earnings events")
+                else:
+                    logger.warning(f"Earnings calendar API returned {earnings_response.status}")
+
+                # Return the structured data AFTER both have been processed
+                return {
+                    "ipo_events": ipo_events,
+                    "earnings_events": earnings_events
+                }
+
         except Exception as e:
-            logger.warning(f"Failed to get comprehensive briefing data: {e}")
-            return self._empty_briefing_data()
+            logger.warning(f"Failed to get calendar data: {e}")
+            # Return an empty structure on any failure
+            return {
+                "ipo_events": [],
+                "earnings_events": []
+            }
     
     def _empty_briefing_data(self) -> Dict[str, Any]:
         """Return empty briefing data structure"""
@@ -210,13 +222,6 @@ async def fetch_stock_news(ticker: str, start_date: str, end_date: str) -> List[
     except Exception as e:
         logger.error(f"Legacy fetch_stock_news failed for {ticker}: {e}")
         return []
-                    else:
-                        logger.warning(f"Briefing data API returned {response.status}")
-                        return self._empty_briefing_data()
-                        
-        except Exception as e:
-            logger.warning(f"Failed to get comprehensive briefing data: {e}")
-            return self._empty_briefing_data()
     
     def _empty_briefing_data(self) -> Dict[str, Any]:
         """Return empty briefing data structure"""
