@@ -442,6 +442,50 @@ class DatabaseService:
         finally:
             cursor.close()
     
+    def get_briefing_definition_by_key(self, briefing_key: str) -> Optional[dict]:
+        """Fetches a single briefing definition by its unique key."""
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute(
+                "SELECT * FROM hedgefund_agent.briefing_definitions WHERE briefing_key = %s",
+                (briefing_key,)
+            )
+            row = cursor.fetchone()
+            logger.info(f"Found briefing definition for key: {briefing_key}")
+            return row
+        except Exception as e:
+            logger.error(f"Failed to get briefing definition for key {briefing_key}: {e}")
+            raise
+        finally:
+            cursor.close()
+
+    def get_linked_sections_by_briefing_id(self, briefing_id: int) -> List[dict]:
+        """Fetches all market sections linked to a specific briefing ID."""
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute(
+                """
+                SELECT 
+                    ms.section_key, ms.title, ms.default_symbols, ms.display_order_map,
+                    bs.custom_symbols
+                FROM hedgefund_agent.briefing_sections bs
+                JOIN hedgefund_agent.market_sections ms ON bs.section_id = ms.id
+                WHERE bs.briefing_id = %s
+                ORDER BY ms.id
+                """,
+                (briefing_id,)
+            )
+            rows = cursor.fetchall()
+            logger.info(f"Found {len(rows)} linked sections for briefing ID {briefing_id}")
+            return rows
+        except Exception as e:
+            logger.error(f"Failed to get linked sections for briefing ID {briefing_id}: {e}")
+            raise
+        finally:
+            cursor.close()
+
     # === System Logging ===
     
     def log_system_event(self, service: str, level: str, message: str, metadata: dict = None):
