@@ -18,6 +18,7 @@ from services.notion_publisher import NotionPublisher
 from services.telegram_notifier import TelegramNotifier
 from generators.commentary_generator import CommentaryGenerator
 from generators.deep_dive_generator import DeepDiveGenerator
+from generators.briefing_generator import BriefingGenerator
 from config.settings import DATABASE_CONFIG, AGENT_NAME
 
 
@@ -68,6 +69,21 @@ class ContentEngine:
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize DeepDiveGenerator: {e}")
             self.deep_dive_generator = None
+
+        try:
+            # The new briefing services
+            self.briefing_config_service = ConfigService(self.database_service.get_db_connection(), SENTIMENT_CONFIG)
+            self.sentiment_service = ComprehensiveMarketSentimentService(self.market_client, self.gpt_service)
+
+            # The new briefing generator
+            self.briefing_generator = BriefingGenerator(
+                config_service=self.briefing_config_service,
+                sentiment_service=self.sentiment_service
+            )
+            self.logger.info("✅ BriefingGenerator initialized successfully")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to initialize BriefingGenerator: {e}")
+            self.briefing_generator = None
         
         self.logger.info("✅ ContentEngine initialized with all services")
     
@@ -274,7 +290,54 @@ class ContentEngine:
                 "headline": content.headline_used.headline
             } if content.headline_used else None
         }
-    
+
+    async def run_briefing_flow(self, briefing_key: str):
+        """
+        Executes the end-to-end flow for generating and publishing a briefing.
+        """
+        self.logger.info(f"--- Starting briefing flow for '{briefing_key}' ---")
+        if not self.briefing_generator:
+            self.logger.error("BriefingGenerator not available. Aborting flow.")
+            return
+
+        try:
+            # 1. Generate the content using the specialized generator
+            analysis_result, config = await self.briefing_generator.create(briefing_key)
+            
+            # 2. Publish the generated content to Notion to get the URL
+            self.logger.info(f"Publishing '{briefing_key}' to Notion...")
+            notion_page_url = await self.notion_publisher.publish_briefing(analysis_result, config)
+            
+            if not notion_page_url:
+                raise Exception("Failed to publish to Notion, aborting Twitter post.")
+
+            # 3. Construct the announcement tweet
+            sentiment_emoji = "🐂" if analysis_result.sentiment == "BULLISH" else "🐻" if analysis_result.sentiment == "BEARISH" else "📊"
+            tweet_text = (
+                f"{sentiment_emoji} Today's Global Market Briefing is live.\n\n"
+                f"Overall Sentiment: {analysis_result.sentiment.value}\n\n"
+                f"Read the full institutional analysis on cross-asset flows, regional divergences, and tactical positioning here:\n"
+                f"{notion_page_url}"
+            )
+            
+            # Create a content object for the publishing service
+            tweet_content = GeneratedContent(
+                text=tweet_text,
+                content_type=ContentType.BRIEFING,
+                theme="Market Briefing"
+            )
+            
+            # 4. Publish the tweet using the existing publishing service
+            self.logger.info("Publishing announcement tweet...")
+            self.publishing_service.publish_tweet(tweet_content)
+
+            self.logger.info(f"--- ✅ Successfully completed briefing flow for '{briefing_key}' ---")
+            return analysis_result
+            
+        except Exception as e:
+            self.logger.error(f"--- ❌ Briefing flow failed for '{briefing_key}': {e} ---")
+            await self.telegram_notifier.send_message(f"ALERT: Briefing flow failed for {briefing_key}. Error: {e}")
+            
     async def generate_commentary_now(self, category: Optional[ContentCategory] = None) -> Dict[str, Any]:
         """
         Convenience method to generate and publish commentary immediately.

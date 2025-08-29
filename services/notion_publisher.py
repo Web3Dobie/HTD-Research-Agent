@@ -123,6 +123,50 @@ class NotionPublisher:
             self.logger.error(f"   Content: {content.text[:100]}...")
             return None
     
+    async def publish_briefing(self, analysis, config: dict) -> Optional[str]:
+        """
+        Creates a rich Notion page for a briefing and returns its public URL.
+        """
+        if not self.client:
+            self.logger.error("Notion client not available for briefing publish")
+            return None
+
+        publishing_config = config.get('publishing_config', {})
+        database_id = publishing_config.get('notion_database_id')
+        
+        if not database_id:
+            self.logger.error("Briefing Notion Database ID not found in config")
+            return None
+        
+        try:
+            page_properties = {
+                "Name": {"title": [{"text": {"content": config.get('briefing_title')}}]},
+                "Date": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
+                "Sentiment": {"select": {"name": analysis.sentiment.value}}
+            }
+            
+            page_blocks = self._build_briefing_blocks(analysis)
+
+            # NOTE: Your existing client is synchronous. For an async method,
+            # you would ideally use an async Notion client.
+            # For now, this will work but will block the event loop.
+            created_page = self.client.pages.create(
+                parent={"database_id": database_id},
+                properties=page_properties,
+                children=page_blocks
+            )
+            
+            page_url = created_page.get("url")
+            self.logger.info(f"✅ Briefing published to Notion: {created_page['id']}")
+            self.logger.info(f"   Title: {config.get('briefing_title')}")
+            self.logger.info(f"   URL: {page_url}")
+
+            return page_url
+
+        except Exception as e:
+            self.logger.error(f"❌ Failed to publish briefing to Notion: {e}")
+            return None
+
     def _format_content_category(self, content: GeneratedContent) -> str:
         """
         Format content category for Notion select field.
@@ -149,6 +193,51 @@ class NotionPublisher:
             content_type_str = content.content_type.value if hasattr(content.content_type, 'value') else str(content.content_type)
             return content_type_mapping.get(content_type_str.upper(), "commentary")
     
+    def _build_briefing_blocks(self, analysis) -> list:
+        """Converts a SentimentAnalysis object into a list of Notion blocks."""
+        sentiment_emoji = "🐂" if analysis.sentiment.value == "BULLISH" else "🐻" if analysis.sentiment.value == "BEARISH" else "📊"
+        blocks = [
+            {"type": "heading_1", "heading_1": {"rich_text": [{"type": "text", "text": {"content": f"Global Market Sentiment: {analysis.sentiment.value} {sentiment_emoji}"}}]}},
+            {"type": "quote", "quote": {"rich_text": [{"type": "text", "text": {"content": analysis.market_summary}}]}},
+            {"type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Key Market Drivers"}}]}},
+            *[{
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": driver}}]}
+            } for driver in analysis.key_drivers],
+            {"type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Detailed Section Analysis"}}]}}
+        ]
+        
+        for section in analysis.section_analyses:
+            section_title = section.section_name.replace('_', ' ').title()
+            toggle_header = f"{section_title}: {section.section_sentiment} ({section.avg_performance:+.2f}%)"
+            
+            blocks.append({
+                "type": "toggle",
+                "toggle": {
+                    "rich_text": [{"type": "text", "text": {"content": toggle_header}}],
+                    "children": [
+                        {"type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": mover}}]}} 
+                        for mover in section.key_movers
+                    ]
+                }
+            })
+        
+        # --- ADD THE FOOTNOTE ---
+        blocks.extend([
+            {"type": "divider", "divider": {}},
+            {
+                "type": "quote",
+                "quote": {
+                    "rich_text": [{
+                        "type": "text",
+                        "text": {"content": "Market data and calendars are sourced from Binance, IG-Index, Mexc, and Finnhub."},
+                        "annotations": {"italic": True}
+                    }]
+                }
+            }
+        ])
+        return blocks
+
     def update_engagement_metrics(
         self, 
         notion_page_id: str, 
@@ -197,6 +286,8 @@ class NotionPublisher:
         except Exception as e:
             self.logger.error(f"❌ Failed to update engagement for {notion_page_id}: {e}")
             return False
+
+    
     
     def get_client_status(self) -> Dict[str, Any]:
         """

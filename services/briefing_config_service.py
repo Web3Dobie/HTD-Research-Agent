@@ -64,5 +64,5 @@ class ConfigService:
                 'notion_property_name': briefing_def['notion_property_name']
             },
             'market_data_sections': market_data_sections
-            # Note: You can load the sentiment_config from a simple file or another table
+            'sentiment_config': self.sentiment_config
         }
