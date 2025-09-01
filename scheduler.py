@@ -422,23 +422,39 @@ class HedgeFundScheduler:
         
         return wrapper
     
+    # async def _run_briefing(self, briefing_type: str):
+    #     """Generate and publish market briefing"""
+    #     request = ContentRequest(
+    #         content_type=ContentType.BRIEFING,
+    #         category=ContentCategory.MACRO,
+    #         include_market_data=True
+    #     )
+        
+    #     result = await self.content_engine.generate_and_publish_content(request)
+        
+    #     if result.get('success'):
+    #         logger.info(f"📋 {briefing_type} briefing published")
+    #         twitter_url = result.get('publishing', {}).get('twitter', {}).get('url')
+    #         return {"success": True, "urls": [twitter_url] if twitter_url else []}
+    #     else:
+    #         logger.error(f"❌ {briefing_type} briefing failed: {result.get('error')}")
+    #         return {"success": False, "error": result.get('error')}
+
     async def _run_briefing(self, briefing_type: str):
-        """Generate and publish market briefing"""
-        request = ContentRequest(
-            content_type=ContentType.BRIEFING,
-            category=ContentCategory.MACRO,
-            include_market_data=True
-        )
+        """Generate and publish market briefing with selective enablement"""
         
-        result = await self.content_engine.generate_and_publish_content(request)
+        # Only enable morning briefing for now
+        if briefing_type != "opening":
+            logger.info(f"Briefing type '{briefing_type}' disabled - only morning briefing active")
+            return {"success": True, "status": "disabled"}
         
-        if result.get('success'):
-            logger.info(f"📋 {briefing_type} briefing published")
-            twitter_url = result.get('publishing', {}).get('twitter', {}).get('url')
-            return {"success": True, "urls": [twitter_url] if twitter_url else []}
-        else:
-            logger.error(f"❌ {briefing_type} briefing failed: {result.get('error')}")
-            return {"success": False, "error": result.get('error')}
+        # Use dedicated briefing pipeline for morning briefing
+        try:
+            await self.content_engine.run_briefing_pipeline("morning_briefing")
+            return {"success": True, "briefing_type": "morning_briefing"}
+        except Exception as e:
+            logger.error(f"Morning briefing failed: {e}")
+            return {"success": False, "error": str(e)}
     
     async def _run_commentary(self):
         """Generate and publish market commentary"""
