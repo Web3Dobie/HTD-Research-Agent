@@ -169,7 +169,7 @@ class GPTService:
             prompt = self._build_institutional_prompt(headline, category_enum)
             
             # Generate comment using existing generate_text method
-            comment = self.generate_text(prompt, max_tokens=100, temperature=0.7)
+            comment = self.generate_text(prompt, max_tokens=250, temperature=0.7)
             
             # Clean and format for institutional use
             formatted_comment = self._format_institutional_comment(comment)
@@ -255,10 +255,6 @@ class GPTService:
         if "HTD Research" not in comment and "— HTD" not in comment:
             # Add signature without brain emoji for institutional feel
             comment += " — HTD Research 📊"
-        
-        # Ensure reasonable length
-        if len(comment) > 140:
-            comment = comment[:137] + "..."
             
         return comment
     

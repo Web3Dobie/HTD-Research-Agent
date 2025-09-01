@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from services.market_sentiment_service import SentimentAnalysis
 
 class ContentType(Enum):
@@ -28,6 +28,7 @@ class Headline:
     used_at: Optional[datetime] = None
     created_at: datetime = field(default_factory=datetime.now)
     id: Optional[int] = None  # Will be set by database
+    commentary: Optional[str] = None  # AI-generated commentary
 
 @dataclass
 class Theme:
@@ -70,6 +71,12 @@ class ContentRequest:
 class BriefingPayload:
     """A container for all data needed to generate a briefing document."""
     market_analysis: SentimentAnalysis
-    market_news: List[Dict[str, Any]] = field(default_factory=list)
+    raw_market_data: Dict[str, List[Dict]] = field(default_factory=dict)  # section_name -> [{'symbol': 'SPY', 'price': 455.20, 'change_percent': 1.25, ...}]
+    market_news: List[Dict[str, Any]] = field(default_factory=list)  # Future Finnhub market news
     earnings_calendar: List[Dict[str, Any]] = field(default_factory=list)
+    ipo_calendar: List[Dict[str, Any]] = field(default_factory=list)  # IPO calendar from MarketClient
+    top_headlines: List[Headline] = field(default_factory=list)  # Database headlines from get_top_headlines_since_midnight()
+    top_gainers: List[Dict[str, Any]] = field(default_factory=list)  # For pre/post market briefings
+    top_losers: List[Dict[str, Any]] = field(default_factory=list)  # For pre/post market briefings
+    stock_specific_news: Dict[str, List[Dict]] = field(default_factory=dict)  # symbol -> news articles for gainers/losers
     config: Dict[str, Any] = field(default_factory=dict)

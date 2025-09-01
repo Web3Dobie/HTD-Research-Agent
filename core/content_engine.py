@@ -23,6 +23,7 @@ from config.settings import DATABASE_CONFIG, AGENT_NAME
 from config.sentiment_config import SENTIMENT_CONFIG
 from services.briefing_config_service import ConfigService
 from services.market_sentiment_service import ComprehensiveMarketSentimentService
+from services.prompt_augmentation_service import PromptAugmentationService
 
 class ContentEngine:
     """
@@ -37,7 +38,8 @@ class ContentEngine:
         self.database_service = DatabaseService(DATABASE_CONFIG)
         self.gpt_service = GPTService()
         self.market_client = MarketClient()
-        
+        self.prompt_augmentation_service = PromptAugmentationService()
+
         # Publishing services
         self.publishing_service = PublishingService()
         self.notion_publisher = NotionPublisher()
@@ -73,19 +75,23 @@ class ContentEngine:
             self.deep_dive_generator = None
 
         try:
-            # The new briefing services
             self.briefing_config_service = ConfigService(self.database_service, SENTIMENT_CONFIG)
-            self.sentiment_service = ComprehensiveMarketSentimentService(self.market_client, self.gpt_service)
+            self.sentiment_service = ComprehensiveMarketSentimentService(self.gpt_service)
 
             # The new briefing generator
             self.briefing_generator = BriefingGenerator(
                 config_service=self.briefing_config_service,
-                sentiment_service=self.sentiment_service
+                sentiment_service=self.sentiment_service,
+                market_client=self.market_client,
+                db_service=self.database_service,
+                gpt_service=self.gpt_service,
+                prompt_augmentation_service=self.prompt_augmentation_service
             )
-            self.logger.info("✅ BriefingGenerator initialized successfully")
+            self.logger.info("✅ BriefingGenerator initialized successfully with orchestrator pattern")
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize BriefingGenerator: {e}")
             self.briefing_generator = None
+            self.news_client = None
         
         self.logger.info("✅ ContentEngine initialized with all services")
     
@@ -234,9 +240,6 @@ class ContentEngine:
                     return None
                 return await self.deep_dive_generator.generate(request)
 
-            elif request.content_type == ContentType.BRIEFING:
-                self.logger.warning("BriefingGenerator not yet implemented")
-                return None
             else:
                 self.logger.error(f"Unknown content type: {request.content_type}")
                 return None
@@ -244,6 +247,88 @@ class ContentEngine:
         except Exception as e:
             self.logger.error(f"❌ Content generation failed: {e}")
             return None
+
+    async def run_briefing_pipeline(self, briefing_key: str = 'morning_briefing'):
+        """
+        Executes the complete, end-to-end pipeline for generating and publishing a briefing.
+        """
+        self.logger.info(f"--- 🚀 Starting {briefing_key} pipeline ---")
+        if not self.briefing_generator:
+            self.logger.error("BriefingGenerator not available. Aborting.")
+            return
+
+        try:
+            # Step 1: Generate the briefing content payload
+            payload = await self.briefing_generator.create(briefing_key)
+            self.logger.info("Step 1/7: Briefing payload generated successfully.")
+
+            # Step 2: Publish to Notion to get the internal page_id
+            notion_result = await self.notion_publisher.publish_briefing(payload, briefing_key)
+            if not notion_result or 'page_id' not in notion_result:
+                raise Exception("Failed to publish to Notion or get page_id.")
+            notion_page_id = notion_result['page_id']
+            self.logger.info(f"Step 2/7: Published to Notion, page_id: {notion_page_id}")
+
+            # Step 3: Create a record in our database to get a clean, permanent ID
+            briefing_id = self.database_service.create_briefing_record(
+                briefing_key=briefing_key,
+                notion_page_id=notion_page_id,
+                title=payload.config.get('briefing_title', 'Market Briefing')
+            )
+            self.logger.info(f"Step 3/7: Created database record, briefing_id: {briefing_id}")
+
+            # Step 4: Construct the final, public-facing URL
+            final_website_url = f"https://www.dutchbrat.com/briefings?briefing_id={briefing_id}"
+            self.logger.info(f"Step 4/7: Constructed public URL: {final_website_url}")
+
+            # Step 5: Generate the promotional tweet using the final URL
+            tweet_text = await self._generate_briefing_promo_tweet(
+                briefing_summary=payload.market_analysis.market_summary,
+                briefing_url=final_website_url
+            )
+            self.logger.info("Step 5/7: Generated promotional tweet text.")
+
+            # Step 6: Create a GeneratedContent object and publish the tweet
+            # This now matches the expected input for your existing PublishingService
+            tweet_content = GeneratedContent(
+                text=tweet_text,
+                content_type=ContentType.BRIEFING,
+                theme="Market Briefing"
+            )
+            tweet_result = self.publishing_service.publish_tweet(tweet_content)
+            
+            if not tweet_result or not tweet_result.success:
+                raise Exception(f"Failed to publish tweet: {tweet_result.error}")
+            self.logger.info(f"Step 6/7: Published tweet: {tweet_result.url}")
+            
+            # Step 7: Update both the Notion Page and our Database with the final URLs
+            self.notion_publisher.update_briefing_with_tweet(
+                notion_page_id=notion_page_id,
+                tweet_url=tweet_result.url
+            )
+            self.database_service.update_briefing_urls(
+                briefing_id=briefing_id,
+                website_url=final_website_url,
+                tweet_url=tweet_result.url
+            )
+            self.logger.info("Step 7/7: Updated Notion page and database with final URLs.")
+
+            self.logger.info(f"--- ✅ {briefing_key} pipeline completed successfully ---")
+
+        except Exception as e:
+            self.logger.error(f"--- ❌ Briefing pipeline failed for '{briefing_key}': {e} ---", exc_info=True)
+            await self.telegram_notifier.send_message(f"ALERT: Briefing pipeline for {briefing_key} failed. Error: {e}")
+
+    async def _generate_briefing_promo_tweet(self, briefing_summary: str, briefing_url: str) -> str:
+        """Uses GPT to generate a promotional tweet for a new briefing."""
+        prompt = f'''
+        Based on the following market summary, generate a catchy, professional tweet (under 260 characters).
+        The tweet must include a hook, key insights, and a call to action. Do not include the URL itself.
+
+        Summary: "{briefing_summary}"
+        '''
+        tweet_text = self.gpt_service.generate_text(prompt, max_tokens=100, temperature=0.8)
+        return f"{tweet_text} Read the full analysis here: {briefing_url}"
     
     async def _log_content_and_results(
         self, 
@@ -292,74 +377,6 @@ class ContentEngine:
                 "headline": content.headline_used.headline
             } if content.headline_used else None
         }
-
-    # Update the method signature to accept the new flag
-    async def run_briefing_flow(self, briefing_key: str, publish_tweet: bool = True):
-        """
-        Executes the end-to-end flow for generating and publishing a briefing.
-
-        Args:
-            briefing_key (str): The key of the briefing to generate.
-            publish_tweet (bool): If False, skips the final Twitter post.
-        """
-        self.logger.info(f"--- Starting briefing flow for '{briefing_key}' (Publish Tweet: {publish_tweet}) ---")
-        if not self.briefing_generator:
-            self.logger.error("BriefingGenerator not available. Aborting flow.")
-            return
-
-        try:
-            # 1. Generate the content
-            analysis_result, config = await self.briefing_generator.create(briefing_key)
-            
-            # 2. Publish to Notion
-            self.logger.info(f"Publishing '{briefing_key}' to Notion...")
-            notion_page_url = await self.notion_publisher.publish_briefing(analysis_result, config)
-            
-            if not notion_page_url:
-                raise Exception("Failed to publish to Notion.")
-            
-            self.logger.info(f"Successfully created Notion page: {notion_page_url}")
-
-            # 3. Conditionally publish the tweet
-            if publish_tweet:
-                self.logger.info("Constructing and publishing announcement tweet...")
-                sentiment_emoji = "🐂" if analysis_result.sentiment.value == "BULLISH" else "🐻" if analysis_result.sentiment.value == "BEARISH" else "📊"
-                tweet_text = (
-                    f"{sentiment_emoji} Today's Global Market Briefing is live.\n\n"
-                    f"Overall Sentiment: {analysis_result.sentiment.value}\n\n"
-                    f"Read the full institutional analysis here:\n"
-                    f"{notion_page_url}"
-                )
-                
-                tweet_content = GeneratedContent(text=tweet_text, content_type=ContentType.BRIEFING, theme="Market Briefing")
-                self.publishing_service.publish_tweet(tweet_content)
-            else:
-                self.logger.warning("Skipping Twitter post because publish_tweet is False.")
-
-            self.logger.info(f"--- ✅ Successfully completed briefing flow for '{briefing_key}' ---")
-            return analysis_result
-            
-        except Exception as e:
-            self.logger.error(f"--- ❌ Briefing flow failed for '{briefing_key}': {e} ---")
-            await self.telegram_notifier.send_message(f"ALERT: Briefing flow failed for {briefing_key}. Error: {e}")
-            
-    async def generate_commentary_now(self, category: Optional[ContentCategory] = None) -> Dict[str, Any]:
-        """
-        Convenience method to generate and publish commentary immediately.
-        
-        Args:
-            category: Optional category filter for headlines
-            
-        Returns:
-            Complete pipeline results
-        """
-        request = ContentRequest(
-            content_type=ContentType.COMMENTARY,
-            category=category,
-            include_market_data=True
-        )
-        
-        return await self.generate_and_publish_content(request)
 
     async def generate_deep_dive_now(self, category: Optional[ContentCategory] = None) -> Dict[str, Any]:
         """

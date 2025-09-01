@@ -114,61 +114,42 @@ class NewsClient:
     
     async def get_calendar_data(self, days_ahead: int = 7) -> Dict[str, List[Dict]]:
         """
-        Get IPO and earnings calendar data
-        
-        Args:
-            days_ahead: Days to look ahead
-            
-        Returns:
-            Dictionary with 'ipo_events' and 'earnings_events'
+        Gets IPO and earnings calendar data concurrently and parses the response
+        using the correct 'events' key.
         """
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Get both calendars concurrently
-                ipo_url = f"{self.base_url}/api/v1/calendar/ipo"
-                earnings_url = f"{self.base_url}/api/v1/calendar/earnings"
-                # Note: Your calendar endpoints seem to use 'days' not 'days_ahead'
-                params = {"days": days_ahead} 
+        async with aiohttp.ClientSession() as session:
+            ipo_url = f"{self.base_url}/api/v1/calendar/ipo?days={days_ahead}"
+            earnings_url = f"{self.base_url}/api/v1/calendar/earnings?days={days_ahead}"
+            
+            try:
+                ipo_task = asyncio.create_task(session.get(ipo_url, timeout=30))
+                earnings_task = asyncio.create_task(session.get(earnings_url, timeout=30))
                 
-                ipo_task = session.get(ipo_url, params=params, timeout=30)
-                earnings_task = session.get(earnings_url, params=params, timeout=30)
-                
-                # --- Corrected Logic Starts Here ---
-                ipo_events = []
-                earnings_events = []
-                
-                # Use asyncio.gather to run tasks concurrently for better performance
                 ipo_response, earnings_response = await asyncio.gather(ipo_task, earnings_task)
-
-                # Process IPO Response
+                
+                ipo_events = []
                 if ipo_response.status == 200:
                     ipo_data = await ipo_response.json()
-                    ipo_events = ipo_data.get("ipoCalendar", []) # Changed to 'ipoCalendar'
-                    logger.debug(f"Got {len(ipo_events)} IPO events")
+                    # --- FIX: Look for the 'events' key ---
+                    ipo_events = ipo_data.get("events", []) 
+                    logger.info(f"Successfully fetched {len(ipo_events)} IPO events.")
                 else:
-                    logger.warning(f"IPO calendar API returned {ipo_response.status}")
-                
-                # Process Earnings Response
+                    logger.warning(f"IPO calendar API returned status {ipo_response.status}")
+
+                earnings_events = []
                 if earnings_response.status == 200:
                     earnings_data = await earnings_response.json()
-                    earnings_events = earnings_data.get("earningsCalendar", []) # Changed to 'earningsCalendar'
-                    logger.debug(f"Got {len(earnings_events)} earnings events")
+                    # --- FIX: Look for the 'events' key ---
+                    earnings_events = earnings_data.get("events", [])
+                    logger.info(f"Successfully fetched {len(earnings_events)} earnings events.")
                 else:
-                    logger.warning(f"Earnings calendar API returned {earnings_response.status}")
+                    logger.warning(f"Earnings calendar API returned status {earnings_response.status}")
 
-                # Return the structured data AFTER both have been processed
-                return {
-                    "ipo_events": ipo_events,
-                    "earnings_events": earnings_events
-                }
+                return {"ipo_events": ipo_events, "earnings_events": earnings_events}
 
-        except Exception as e:
-            logger.warning(f"Failed to get calendar data: {e}")
-            # Return an empty structure on any failure
-            return {
-                "ipo_events": [],
-                "earnings_events": []
-            }
+            except Exception as e:
+                logger.error(f"Failed to get calendar data: {e}", exc_info=True)
+                return {"ipo_events": [], "earnings_events": []}
     
     def _empty_briefing_data(self) -> Dict[str, Any]:
         """Return empty briefing data structure"""

@@ -486,6 +486,54 @@ class DatabaseService:
         finally:
             cursor.close()
 
+    def create_briefing_record(self, briefing_key: str, notion_page_id: str, title: str) -> int:
+        """
+        Inserts a new briefing record into the database and returns its new ID.
+        Uses the existing 'briefings' table schema.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            # Use the column names from your existing table
+            sql = """
+                INSERT INTO hedgefund_agent.briefings (briefing_type, notion_page_id, title)
+                VALUES (%s, %s, %s)
+                RETURNING id;
+            """
+            cursor.execute(sql, (briefing_key, notion_page_id, title))
+            new_id = cursor.fetchone()[0]
+            conn.commit()
+            self.logger.info(f"Created new briefing record with ID: {new_id}")
+            return new_id
+        except Exception as e:
+            self.logger.error(f"Failed to create briefing record: {e}")
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def update_briefing_urls(self, briefing_id: int, website_url: str, tweet_url: str):
+        """
+        Updates an existing briefing record with the final public URLs.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            sql = """
+                UPDATE hedgefund_agent.briefings
+                SET website_url = %s, tweet_url = %s
+                WHERE id = %s;
+            """
+            cursor.execute(sql, (website_url, tweet_url, briefing_id))
+            conn.commit()
+            self.logger.info(f"Updated URLs for briefing record ID: {briefing_id}")
+        except Exception as e:
+            self.logger.error(f"Failed to update briefing URLs for ID {briefing_id}: {e}")
+            conn.rollback()
+            raise
+        finally:
+            cursor.close() 
+
     # === System Logging ===
     
     def log_system_event(self, service: str, level: str, message: str, metadata: dict = None):
