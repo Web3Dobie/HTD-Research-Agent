@@ -441,42 +441,39 @@ class HedgeFundScheduler:
     #         return {"success": False, "error": result.get('error')}
 
     async def _run_briefing(self, briefing_type: str):
-        """Generate and publish market briefing with selective enablement"""
+        """Generate and publish market briefing, letting the wrapper handle exceptions."""
         
         # Only enable morning briefing for now
         if briefing_type != "opening":
-            logger.info(f"Briefing type '{briefing_type}' disabled - only morning briefing active")
-            return {"success": True, "status": "disabled"}
+            logger.info(f"Briefing type '{briefing_type}' disabled - only 'opening' (morning) briefing is active.")
+            return # This is a successful, intentional skip
         
-        # Use dedicated briefing pipeline for morning briefing
-        try:
-            await self.content_engine.run_briefing_pipeline("morning_briefing")
-            return {"success": True, "briefing_type": "morning_briefing"}
-        except Exception as e:
-            logger.error(f"Morning briefing failed: {e}")
-            return {"success": False, "error": str(e)}
+        # The try...except block has been removed.
+        # If run_briefing_pipeline fails, the exception will now be caught
+        # by _safe_job_wrapper, which will send the correct failure notification.
+        await self.content_engine.run_briefing_pipeline("morning_briefing")
     
     async def _run_commentary(self):
-        """Generate and publish market commentary"""
-        try:
-            # Use the convenience function from content_engine
-            from core.content_engine import publish_commentary_now
-            result = await publish_commentary_now()
-            
-            if result.get('success'):
-                logger.info("💬 Commentary published successfully")
-                twitter_url = result.get('publishing', {}).get('twitter', {}).get('url')
-                return {"success": True, "urls": [twitter_url] if twitter_url else []}
-            else:
-                logger.error(f"❌ Commentary failed: {result.get('error')}")
-                return {"success": False, "error": result.get('error')}
-                
-        except Exception as e:
-            logger.error(f"❌ Commentary generation failed: {e}")
-            return {"success": False, "error": str(e)}
+        """
+        Generate and publish market commentary, allowing the wrapper to handle exceptions.
+        """
+        # We removed the try...except block from this method.
+        # Now, if publish_commentary_now fails, the exception will be
+        # caught by _safe_job_wrapper, which will send the correct failure notification.
+        from core.content_engine import publish_commentary_now
+        result = await publish_commentary_now()
+        
+        if result.get('success'):
+            logger.info("💬 Commentary published successfully")
+            twitter_url = result.get('publishing', {}).get('twitter', {}).get('url')
+            return {"success": True, "urls": [twitter_url] if twitter_url else []}
+        else:
+            # If the job didn't fail but returned a failure status, raise an exception
+            # so the wrapper knows it failed.
+            raise Exception(f"Commentary job returned failure status: {result.get('error')}")
     
     async def _run_deep_dive(self):
-        """Generate and publish deep dive thread"""
+        """Generate and publish deep dive thread, raising an exception on failure."""
         request = ContentRequest(
             content_type=ContentType.DEEP_DIVE,
             category=ContentCategory.MACRO,
@@ -485,13 +482,11 @@ class HedgeFundScheduler:
         
         result = await self.content_engine.generate_and_publish_content(request)
         
-        if result.get('success'):
-            logger.info("🧵 Deep dive thread published")
-            twitter_url = result.get('publishing', {}).get('twitter', {}).get('url')
-            return {"success": True, "urls": [twitter_url] if twitter_url else []}
-        else:
-            logger.error(f"❌ Deep dive failed: {result.get('error')}")
-            return {"success": False, "error": result.get('error')}
+        # If the result is not successful, raise an exception for the wrapper to catch
+        if not result or not result.get('success'):
+            raise Exception(f"Deep dive job returned failure status: {result.get('error')}")
+        
+        logger.info("🧵 Deep dive thread published")
     
     def _run_headline_pipeline(self):
         """Run modern headline fetching and scoring pipeline"""
