@@ -125,10 +125,10 @@ class NotionPublisher:
             self.logger.error(f"   Content: {content.text[:100]}...")
             return None
     
-    async def publish_briefing(self, payload: BriefingPayload) -> Optional[str]:
+    async def publish_briefing(self, payload: BriefingPayload, briefing_key: str) -> Optional[Dict]:
         """
-        Creates a comprehensive briefing page from BriefingPayload.
-        Displays market data tables, headlines, calendar data, and sentiment analysis.
+        Creates a comprehensive briefing page, now including the briefing period.
+        Returns a dictionary with page_id and page_url.
         """
         if not self.client:
             self.logger.error("Notion client not available for briefing publish")

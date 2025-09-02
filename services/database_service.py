@@ -22,6 +22,7 @@ class DatabaseService:
     def __init__(self, db_config: dict):
         self.db_config = db_config
         self._connection = None
+        self.logger = logging.getLogger(__name__)
     
     def get_connection(self):
         """Get database connection (create if needed)"""

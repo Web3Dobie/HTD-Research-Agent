@@ -122,8 +122,8 @@ class NewsClient:
             earnings_url = f"{self.base_url}/api/v1/calendar/earnings?days={days_ahead}"
             
             try:
-                ipo_task = asyncio.create_task(session.get(ipo_url, timeout=30))
-                earnings_task = asyncio.create_task(session.get(earnings_url, timeout=30))
+                ipo_task = asyncio.create_task(session.get(ipo_url, timeout=60))
+                earnings_task = asyncio.create_task(session.get(earnings_url, timeout=60))
                 
                 ipo_response, earnings_response = await asyncio.gather(ipo_task, earnings_task)
                 

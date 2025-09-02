@@ -378,6 +378,18 @@ class ContentEngine:
             } if content.headline_used else None
         }
 
+    async def generate_commentary_now(self, category: Optional[ContentCategory] = None) -> Dict[str, Any]:
+        """
+        Convenience method to generate and publish commentary immediately.
+        """
+        request = ContentRequest(
+            content_type=ContentType.COMMENTARY,
+            category=category,
+            include_market_data=True
+        )
+        return await self.generate_and_publish_content(request)
+
+
     async def generate_deep_dive_now(self, category: Optional[ContentCategory] = None) -> Dict[str, Any]:
         """
         Convenience method to generate and publish a deep dive immediately.
