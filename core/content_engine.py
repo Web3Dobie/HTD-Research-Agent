@@ -6,10 +6,11 @@ Integrates headline processing, GPT generation, market data, and multi-platform 
 
 import logging
 import asyncio
+import aiohttp
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 
-from core.models import GeneratedContent, ContentRequest, ContentType, ContentCategory
+from core.models import GeneratedContent, ContentRequest, ContentType, ContentCategory, BriefingPayload
 from services.database_service import DatabaseService
 from services.gpt_service import GPTService
 from services.market_client import MarketClient
@@ -248,11 +249,11 @@ class ContentEngine:
             self.logger.error(f"❌ Content generation failed: {e}")
             return None
 
-    async def run_briefing_pipeline(self, briefing_key: str = 'morning_briefing'):
+    async def run_briefing_pipeline(self, briefing_key: str = 'morning_briefing', publish_tweet: bool = True): # <-- Add the parameter here
         """
         Executes the complete, end-to-end pipeline for generating and publishing a briefing.
         """
-        self.logger.info(f"--- 🚀 Starting {briefing_key} pipeline ---")
+        self.logger.info(f"--- 🚀 Starting {briefing_key} pipeline (Publish Tweet: {publish_tweet}) ---")
         if not self.briefing_generator:
             self.logger.error("BriefingGenerator not available. Aborting.")
             return
@@ -281,55 +282,120 @@ class ContentEngine:
             final_website_url = f"https://www.dutchbrat.com/briefings?briefing_id={briefing_id}"
             self.logger.info(f"Step 4/7: Constructed public URL: {final_website_url}")
 
-            # Step 5: Generate the promotional tweet using the final URL
-            tweet_text = await self._generate_briefing_promo_tweet(
-                briefing_summary=payload.market_analysis.market_summary,
-                briefing_url=final_website_url
-            )
-            self.logger.info("Step 5/7: Generated promotional tweet text.")
+            # Step 5, 6, 7: Conditionally publish tweet and update URLs
+            if publish_tweet:
+                self.logger.info("publish_tweet is True. Proceeding with tweet publication.")
+                
+                # Step 5: Generate the promotional tweet
+                tweet_text = await self._generate_briefing_promo_tweet(
+                    payload=payload,
+                    briefing_url=final_website_url
+                )
+                self.logger.info("Step 5/7: Generated promotional tweet text.")
 
-            # Step 6: Create a GeneratedContent object and publish the tweet
-            # This now matches the expected input for your existing PublishingService
-            tweet_content = GeneratedContent(
-                text=tweet_text,
-                content_type=ContentType.BRIEFING,
-                theme="Market Briefing"
-            )
-            tweet_result = self.publishing_service.publish_tweet(tweet_content)
-            
-            if not tweet_result or not tweet_result.success:
-                raise Exception(f"Failed to publish tweet: {tweet_result.error}")
-            self.logger.info(f"Step 6/7: Published tweet: {tweet_result.url}")
-            
-            # Step 7: Update both the Notion Page and our Database with the final URLs
-            self.notion_publisher.update_briefing_with_tweet(
-                notion_page_id=notion_page_id,
-                tweet_url=tweet_result.url
-            )
-            self.database_service.update_briefing_urls(
-                briefing_id=briefing_id,
-                website_url=final_website_url,
-                tweet_url=tweet_result.url
-            )
-            self.logger.info("Step 7/7: Updated Notion page and database with final URLs.")
+                # Step 6: Publish the tweet
+                tweet_content = GeneratedContent(text=tweet_text, content_type=ContentType.BRIEFING, theme="Market Briefing")
+                tweet_result = self.publishing_service.publish_tweet(tweet_content)
+                if not tweet_result or not tweet_result.success:
+                    raise Exception(f"Failed to publish tweet: {tweet_result.error}")
+                self.logger.info(f"Step 6/7: Published tweet: {tweet_result.url}")
+                
+                # Step 7: Update Notion Page and Database with URLs
+                self.notion_publisher.update_briefing_with_tweet(
+                    notion_page_id=notion_page_id,
+                    tweet_url=tweet_result.url
+                )
+                self.database_service.update_briefing_urls(
+                    briefing_id=briefing_id,
+                    website_url=final_website_url,
+                    tweet_url=tweet_result.url
+                )
+                self.logger.info("Step 7/7: Updated Notion page and database with final URLs.")
+            else:
+                self.logger.warning("publish_tweet is False. Skipping Twitter post and URL updates.")
+                self.database_service.update_briefing_urls(
+                    briefing_id=briefing_id,
+                    website_url=final_website_url,
+                    tweet_url="" # Pass an empty string for the tweet_url
+                )
 
-            self.logger.info(f"--- ✅ {briefing_key} pipeline completed successfully ---")
+            # Step 8 (New): Fetch the parsed JSON and cache it in the database
+                try:
+                    self.logger.info(f"Fetching parsed JSON from website API to cache for briefing ID: {briefing_id}")
+                    # The agent calls its own website's API to get the fully parsed content
+                    async with aiohttp.ClientSession() as session:
+                        website_api_url = f"https://www.dutchbrat.com/api/briefings?briefingId={notion_page_id}"
+                        async with session.get(website_api_url) as response:
+                            if response.ok:
+                                # We need to get the briefing from the 'data' array
+                                api_response = await response.json()
+                                briefing_json = api_response.get('data', [{}])[0]
+                                # Save the parsed content to our new cache column
+                                self.database_service.update_briefing_json_content(briefing_id, briefing_json)
+                            else:
+                                self.logger.error("Failed to fetch parsed JSON for caching.")
+                except Exception as e:
+                    self.logger.error(f"Failed during caching step: {e}")
+
+                    self.logger.info(f"--- ✅ {briefing_key} pipeline completed successfully ---")
 
         except Exception as e:
             self.logger.error(f"--- ❌ Briefing pipeline failed for '{briefing_key}': {e} ---", exc_info=True)
             await self.telegram_notifier.send_message(f"ALERT: Briefing pipeline for {briefing_key} failed. Error: {e}")
-
-    async def _generate_briefing_promo_tweet(self, briefing_summary: str, briefing_url: str) -> str:
-        """Uses GPT to generate a promotional tweet for a new briefing."""
-        prompt = f'''
-        Based on the following market summary, generate a catchy, professional tweet (under 260 characters).
-        The tweet must include a hook, key insights, and a call to action. Do not include the URL itself.
-
-        Summary: "{briefing_summary}"
-        '''
-        tweet_text = self.gpt_service.generate_text(prompt, max_tokens=100, temperature=0.8)
-        return f"{tweet_text} Read the full analysis here: {briefing_url}"
     
+    async def _generate_briefing_promo_tweet(self, payload: BriefingPayload, briefing_url: str) -> str:
+        """
+        Generates a promotional tweet by creating a GPT-powered blurb
+        based on the briefing's Key Market Drivers, with a specific structure.
+        """
+        analysis = payload.market_analysis
+        key_drivers = analysis.key_drivers
+
+        if not key_drivers:
+            # Fallback tweet
+            return f"Today's market briefing is now live! See the full analysis of today's price action.\n\nRead more here:\n{briefing_url}\n\n#MarketBriefing #Investing"
+
+        # Step 1: Generate the AI blurb from the key drivers
+        drivers_str = ", ".join(key_drivers)
+        prompt = f"Based on these key market drivers: '{drivers_str}', write a single, catchy summary sentence for a tweet (under 120 characters)."
+        blurb = await asyncio.to_thread(
+            self.gpt_service.generate_text,
+            prompt,
+            max_tokens=45,
+            temperature=0.8
+        )
+
+        # Step 2: Format the Key Drivers list with emojis
+        section_emoji_map = {
+            'us_futures': '🇺🇸', 'european_futures': '🇪🇺', 'asian_focus': '🌏',
+            'crypto': '🪙', 'fx': '💱', 'rates': '💵', 'volatility': '📉'
+        }
+        formatted_drivers = []
+        for driver in key_drivers[:3]:
+            emoji = '➡️'
+            for section_key, emoji_char in section_emoji_map.items():
+                if section_key.replace('_', ' ').lower() in driver.lower():
+                    emoji = emoji_char
+                    break
+            formatted_drivers.append(f"{emoji} {driver}")
+        
+        drivers_text = "\n".join(formatted_drivers)
+        hashtags = "#MarketAnalysis #Investing #Finance"
+        
+        # --- Step 3: Assemble the final tweet in your desired order ---
+        # 1. Key Drivers
+        # 2. Link
+        # 3. AI Blurb
+        # 4. Hashtags
+        tweet_text = (
+            f"{drivers_text}\n\n"
+            f"Detailed analysis here:\n{briefing_url}\n\n"
+            f"{blurb.strip()}\n\n"
+            f"{hashtags}"
+        )
+        
+        return tweet_text
+
     async def _log_content_and_results(
         self, 
         content: GeneratedContent, 

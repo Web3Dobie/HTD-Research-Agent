@@ -70,7 +70,7 @@ class HedgeFundScheduler:
                 self.headline_pipeline = None
         
         # BST/GMT aware scheduling - these are your desired BST times
-        self.bst_briefing_times = ["07:30", "14:15", "17:00", "21:45"]
+        self.bst_briefing_times = ["07:30", "14:07", "16:25", "21:40"]
         self.bst_commentary_times = ["07:00", "08:00", "10:00", "11:00", "15:30", "18:00", "20:00", "22:00", "23:00"]
         
         # Calculate BST status once during initialization
@@ -422,36 +422,23 @@ class HedgeFundScheduler:
         
         return wrapper
     
-    # async def _run_briefing(self, briefing_type: str):
-    #     """Generate and publish market briefing"""
-    #     request = ContentRequest(
-    #         content_type=ContentType.BRIEFING,
-    #         category=ContentCategory.MACRO,
-    #         include_market_data=True
-    #     )
-        
-    #     result = await self.content_engine.generate_and_publish_content(request)
-        
-    #     if result.get('success'):
-    #         logger.info(f"📋 {briefing_type} briefing published")
-    #         twitter_url = result.get('publishing', {}).get('twitter', {}).get('url')
-    #         return {"success": True, "urls": [twitter_url] if twitter_url else []}
-    #     else:
-    #         logger.error(f"❌ {briefing_type} briefing failed: {result.get('error')}")
-    #         return {"success": False, "error": result.get('error')}
-
     async def _run_briefing(self, briefing_type: str):
         """Generate and publish market briefing, letting the wrapper handle exceptions."""
         
-        # Only enable morning briefing for now
-        if briefing_type != "opening":
-            logger.info(f"Briefing type '{briefing_type}' disabled - only 'opening' (morning) briefing is active.")
-            return # This is a successful, intentional skip
+        # Explicit mapping of scheduler names to briefing pipeline keys
+        briefing_mapping = {
+            "opening": "morning_briefing",
+            "midday": "pre_market_briefing",
+            "afternoon": "eu_close_briefing",
+            "close": "us_close_briefing"
+        }
         
-        # The try...except block has been removed.
-        # If run_briefing_pipeline fails, the exception will now be caught
-        # by _safe_job_wrapper, which will send the correct failure notification.
-        await self.content_engine.run_briefing_pipeline("morning_briefing")
+        if briefing_type not in briefing_mapping:
+            logger.info(f"Briefing type '{briefing_type}' disabled")
+            return
+        
+        briefing_key = briefing_mapping[briefing_type]
+        await self.content_engine.run_briefing_pipeline(briefing_key)
     
     async def _run_commentary(self):
         """

@@ -4,7 +4,7 @@ import psycopg2.extras
 import logging
 import json
 import asyncio
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, timezone
 from typing import List, Dict, Optional
 
 # Use absolute imports for the core models
@@ -293,41 +293,66 @@ class DatabaseService:
         finally:
             cursor.close()
 
-    async def get_top_headlines_since_midnight(self, limit: int = 10) -> List[Headline]:
+    async def get_top_headlines(self, since_datetime: datetime, limit: int = 10) -> List[Headline]:
         """
-        Asynchronously fetches the top N headlines since midnight of the current day.
-        Designed for the morning briefing.
+        Asynchronously fetches the top N headlines since a specific datetime.
         """
-        today_midnight = datetime.combine(datetime.now().date(), time.min)
-        logger.info(f"📰 Fetching top {limit} headlines since {today_midnight}")
+        self.logger.info(f"📰 Fetching top {limit} headlines since {since_datetime}")
 
         try:
-            # Run the synchronous DB call in a separate thread
+            # Run the synchronous DB call in a separate thread for async compatibility
             def db_call():
                 conn = self.get_connection()
-                # Use RealDictCursor to get dict-like rows
+                # Use RealDictCursor to get dict-like rows, which is safer for the Headline model
                 cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
                 try:
-                    cursor.execute("""
+                    # Corrected to use 'created_at'
+                    sql = """
                         SELECT * FROM hedgefund_agent.headlines
                         WHERE created_at >= %s
                         ORDER BY score DESC, created_at DESC
                         LIMIT %s;
-                    """, (today_midnight, limit))
+                    """
+                    cursor.execute(sql, (since_datetime, limit))
                     return cursor.fetchall()
                 finally:
                     cursor.close()
 
             rows = await asyncio.to_thread(db_call)
 
+            # Unpack dictionary rows directly into the Headline dataclass
             headlines = [Headline(**row) for row in rows]
-            logger.info(f"✅ Successfully fetched {len(headlines)} headlines for briefing.")
+            self.logger.info(f"✅ Successfully fetched {len(headlines)} headlines.")
             return headlines
 
         except Exception as e:
-            logger.error(f"❌ Database error while fetching briefing headlines: {e}")
+            self.logger.error(f"❌ Database error while fetching headlines: {e}")
             return []
-    
+
+    def update_briefing_json_content(self, briefing_id: int, json_content: dict):
+        """
+        Saves the fully parsed JSON content of a briefing to the cache column.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            # psycopg2 can automatically convert a Python dict to a JSONB type
+            import json
+            sql = """
+                UPDATE hedgefund_agent.briefings
+                SET json_content = %s
+                WHERE id = %s;
+            """
+            cursor.execute(sql, (json.dumps(json_content), briefing_id))
+            conn.commit()
+            self.logger.info(f"Successfully cached JSON content for briefing ID: {briefing_id}")
+        except Exception as e:
+            self.logger.error(f"Failed to cache JSON content for briefing ID {briefing_id}: {e}")
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
     # === Theme Operations ===
     
     def is_duplicate_theme(self, theme: str, hours_back: int = 24) -> bool:
@@ -534,6 +559,26 @@ class DatabaseService:
             raise
         finally:
             cursor.close() 
+
+    def get_all_equity_symbols(self) -> List[Dict]:
+        """
+        Fetches all active equity symbols along with their EPIC and primary status.
+        Returns a list of dictionaries.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) # Use RealDictCursor
+        try:
+            sql = """
+                SELECT symbol, epic, is_primary_symbol 
+                FROM hedgefund_agent.stock_universe 
+                WHERE active = 't' AND asset_type = 'stock';
+            """
+            cursor.execute(sql)
+            symbols_data = cursor.fetchall()
+            self.logger.info(f"Fetched {len(symbols_data)} active equity symbols for screening.")
+            return symbols_data
+        finally:
+            cursor.close()
 
     # === System Logging ===
     

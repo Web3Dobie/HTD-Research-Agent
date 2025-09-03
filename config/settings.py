@@ -75,6 +75,7 @@ RSS_FEED_URLS = {
     "business-insider": "https://markets.businessinsider.com/rss/news",
     "tradingview-news": "https://www.tradingview.com/feed/",
     "yahoo_finance": "https://finance.yahoo.com/news/rssindex",
+    "zerohedge": "https://cms.zerohedge.com/fullrss2.xml",
     "marketwatch": "https://www.marketwatch.com/rss/topstories",
 }
 
@@ -99,3 +100,6 @@ if not NOTION_CONFIG['api_key']:
 # Validate Azure OpenAI config
 if not all([AZURE_OPENAI_API_KEY, AZURE_DEPLOYMENT_ID, AZURE_RESOURCE_NAME]):
     raise ValueError("Missing required Azure OpenAI environment variables")
+
+# Feature toggles
+PUBLISH_TWEETS = os.getenv('PUBLISH_TWEETS', 'False').lower() in ('true', '1', 't')

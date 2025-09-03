@@ -52,7 +52,7 @@ class MarketClient:
             async with aiohttp.ClientSession() as session:
                 url = f"{self.base_url}/api/v1/prices/bulk"
                 payload = {"symbols": tickers}
-                async with session.post(url, json=payload, timeout=180) as response:
+                async with session.post(url, json=payload, timeout=1200) as response:
                     if response.status == 200:
                         data = await response.json()
                         result = {p_data.get('symbol'): p_data for p_data in data.get('data', [])}
@@ -111,8 +111,7 @@ class MarketClient:
         news_map = {}
         for symbol, result in zip(symbols, results):
             if isinstance(result, list) and result:
-                news_map[symbol] = result[:2] # Limit to 2 articles per symbol
-        
+                news_map[symbol] = result # no limit
         logger.info(f"Got news for {len(news_map)} symbols.")
         return news_map
 

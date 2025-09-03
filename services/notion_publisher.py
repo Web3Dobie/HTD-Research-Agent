@@ -147,12 +147,11 @@ class NotionPublisher:
             # Create page title with date
             page_title = f"{payload.config.get('briefing_title', 'Market Briefing')} - {datetime.now().strftime('%Y-%m-%d')}"
             
-            # Step 1: Create page properties
             page_properties = {
                 "Name": {"title": [{"text": {"content": page_title}}]},
                 "Date": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
                 "Sentiment": {"select": {"name": analysis.sentiment.value}},
-                "Period": {"select": {"name": "Morning Briefing"}}
+                "Period": {"select": {"name": payload.config.get('briefing_title', 'Market Briefing')}}  # ← DYNAMIC
             }
             
             # Step 2: Build comprehensive page content
@@ -199,7 +198,7 @@ class NotionPublisher:
             self.client.pages.update(
                 page_id=notion_page_id,
                 properties={
-                    "Tweet_URL": {"url": tweet_url} # Assumes you have a 'Tweet_URL' property in Notion
+                    "Tweet URL": {"url": tweet_url} # Assumes you have a 'Tweet URL' property in Notion
                 }
             )
             self.logger.info(f"Successfully updated Notion page {notion_page_id} with tweet URL.")
@@ -237,6 +236,206 @@ class NotionPublisher:
                 "column_list": { "children": column_list_children }
             })
         return layout_blocks
+
+    def _build_headlines_section(self, payload: BriefingPayload) -> list:
+        """
+        Builds the Notion blocks for the headlines section with enhanced news display.
+        Shows headline + summary for each article, with proper toggles.
+        """
+        news_by_symbol = payload.stock_specific_news
+        top_headlines = payload.top_headlines
+
+        # Route to the pre-market format if news_by_symbol is present
+        if news_by_symbol:
+            blocks = [{
+                "type": "heading_2",
+                "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Top Gainers & Losers News"}}]}
+            }]
+            
+            # Get the symbols in the correct order (gainers then losers)
+            ordered_symbols = payload.config.get('market_data_sections', {}).get('top_gainers', {}).get('symbols', []) + \
+                            payload.config.get('market_data_sections', {}).get('top_losers', {}).get('symbols', [])
+
+            for symbol in ordered_symbols:
+                articles = news_by_symbol.get(symbol)
+                if not articles: 
+                    continue
+
+                # Add a heading for the symbol
+                blocks.append({
+                    "type": "heading_3",
+                    "heading_3": {"rich_text": [{"type": "text", "text": {"content": f"📰 News for {symbol}"}}]}
+                })
+
+                # Display the first 2 articles with headline + summary
+                for article in articles[:2]:
+                    article_blocks = self._create_article_blocks(article)
+                    blocks.extend(article_blocks)
+
+                # Put the rest in a toggle if there are more than 2 articles
+                if len(articles) > 2:
+                    toggle_children = []
+                    for article in articles[2:]:
+                        article_blocks = self._create_article_blocks(article)
+                        toggle_children.extend(article_blocks)
+                    
+                    blocks.append({
+                        "type": "toggle",
+                        "toggle": {
+                            "rich_text": [{"type": "text", "text": {"content": f"Show {len(articles) - 2} more headlines..."}}],
+                            "children": toggle_children
+                        }
+                    })
+                
+                blocks.append({"type": "divider", "divider": {}})
+            return blocks
+        
+        # Fallback to the original logic for the morning_briefing
+        elif top_headlines:
+            return self._build_morning_briefing_headlines(top_headlines)
+        
+        # Default if no headlines are present at all
+        else:
+            return [{
+                "type": "heading_2",
+                "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Top Headlines"}}]}
+            }, {
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": "No high-impact headlines available."}}]}
+            }]
+
+    def _build_morning_briefing_headlines(self, headlines: List[Headline]) -> list:
+        """Builds the headline blocks for the standard morning briefing."""
+        blocks = [{
+            "type": "heading_2",
+            "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Top Headlines"}}]}
+        }]
+        
+        for headline in headlines:
+            headline_text = headline.headline
+            url = headline.url or ""
+            summary = headline.summary or ""
+            score = headline.score or 0
+            commentary = getattr(headline, 'commentary', None)
+
+            blocks.append({
+                "type": "heading_3",
+                "heading_3": {"rich_text": [{"type": "text", "text": {"content": headline_text}, "annotations": {"bold": True}}]}
+            })
+
+            if commentary:
+                blocks.append({
+                    "type": "quote",
+                    "quote": {"rich_text": [{"type": "text", "text": {"content": commentary}, "annotations": {"color": "blue"}}]}
+                })
+
+            toggle_children = []
+            if summary:
+                toggle_children.append({"type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"Summary: {summary}"}}]}})
+            if url:
+                toggle_children.append({
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": "Source Link", "link": {"url": url}}}]}
+                })
+            if score:
+                toggle_children.append({"type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"Impact Score: {score}/10"}}]}})
+
+            if toggle_children:
+                blocks.append({
+                    "type": "toggle",
+                    "toggle": {
+                        "rich_text": [{"type": "text", "text": {"content": "Details & Source"}}],
+                        "children": toggle_children
+                    }
+                })
+            
+            blocks.append({"type": "divider", "divider": {}})
+
+        return blocks
+
+    def _build_market_data_table(self, section_name: str, section_config: dict, raw_data: List[Dict]) -> List[Dict]:
+        """
+        Builds a list of blocks for a market data section, with special 2-column
+        formatting and yield change estimation for interest rates.
+        """
+        section_title = section_config.get('title', section_name.replace('_', ' ').title())
+        blocks = [{"type": "heading_3", "heading_3": {"rich_text": [{"type": "text", "text": {"content": section_title}}]}}]
+
+        if not raw_data:
+            blocks.append({"type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": "Data not available."}}]}})
+            return blocks
+
+        table_rows = []
+        is_rates_section = 'Yield' in section_config.get('title', '') or section_name == 'rates'
+
+        for symbol_data in raw_data:
+            display_name = symbol_data.get('display_name', symbol_data.get('symbol', 'N/A'))
+            price = symbol_data.get('price', 0)
+            market_status = symbol_data.get('market_status', 'OPEN').upper()
+
+            if market_status == 'CLOSED':
+                change_formatted = "Market Closed"
+                change_color = "gray"
+                price_formatted = f"{price:,.2f}"
+            elif is_rates_section:
+                price_formatted = f"{price:,.2f}"
+                change_percent = symbol_data.get('change_percent', 0)
+                if '2Y' in display_name: multiplier = -40
+                elif '10Y' in display_name: multiplier = -17
+                else: multiplier = -20
+                change_bps = change_percent * multiplier
+                change_formatted = f"{change_bps:+.0f} bps"
+                change_color = "green" if change_bps < 0 else "red"
+            else:
+                price_formatted = f"{price:,.2f}"
+                if 'USD' in symbol_data.get('symbol', '') or symbol_data.get('symbol', '').startswith('$'):
+                    price_formatted = f"${price:,.2f}"
+                change_percent = symbol_data.get('change_percent', 0)
+                change_formatted = f"{change_percent:+.2f}%"
+                change_color = "green" if change_percent > 0 else "red"
+
+            if is_rates_section:
+                cells = [
+                    [{"type": "text", "text": {"content": display_name}, "annotations": {"bold": True}}],
+                    [{"type": "text", "text": {"content": change_formatted}, "annotations": {"color": change_color}}]
+                ]
+            else:
+                cells = [
+                    [{"type": "text", "text": {"content": display_name}, "annotations": {"bold": True}}],
+                    [{"type": "text", "text": {"content": price_formatted}}],
+                    [{"type": "text", "text": {"content": change_formatted}, "annotations": {"color": change_color}}]
+                ]
+            
+            table_rows.append({"type": "table_row", "table_row": {"cells": cells}})
+
+        if is_rates_section:
+            table_width = 2
+            header_cells = [
+                [{"type": "text", "text": {"content": "Instrument"}, "annotations": {"bold": True}}],
+                [{"type": "text", "text": {"content": "Change in Yield"}, "annotations": {"bold": True}}]
+            ]
+        else:
+            table_width = 3
+            header_cells = [
+                [{"type": "text", "text": {"content": "Instrument"}, "annotations": {"bold": True}}],
+                [{"type": "text", "text": {"content": "Level"}, "annotations": {"bold": True}}],
+                [{"type": "text", "text": {"content": "Change"}, "annotations": {"bold": True}}]
+            ]
+            
+        table_block = {
+            "type": "table",
+            "table": {
+                "table_width": table_width,
+                "has_column_header": True,
+                "has_row_header": False,
+                "children": [
+                    {"type": "table_row", "table_row": {"cells": header_cells}},
+                    *table_rows
+                ]
+            }
+        }
+        blocks.append(table_block)
+        return blocks
     
     def _format_content_category(self, content: GeneratedContent) -> str:
         """
@@ -391,7 +590,8 @@ class NotionPublisher:
         ])
         
         # === TOP HEADLINES ===
-        headlines_blocks = self._build_headlines_section(payload.top_headlines)
+        # Pass the entire payload object to the router method
+        headlines_blocks = self._build_headlines_section(payload)
         blocks.extend(headlines_blocks)
         
         # === DETAILED SECTION ANALYSIS ===
@@ -539,124 +739,183 @@ class NotionPublisher:
 
 
     def _build_calendar_section(self, title: str, events: List[Dict], event_type: str) -> List[Dict]:
-        """Builds a list of blocks for a calendar section (heading + list items)."""
-        # Start with a heading block
+        """
+        Builds a list of blocks for a calendar section.
+        Shows the first 10 events in a table, and hides the rest in a
+        toggle as a bulleted list to work around Notion API limitations.
+        """
         blocks = [{
             "type": "heading_2",
             "heading_2": {"rich_text": [{"type": "text", "text": {"content": title}}]}
         }]
 
         if not events or not isinstance(events, list):
-            blocks.append({
-                "type": "paragraph",
-                "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"No upcoming {event_type} events."}}]}
-            })
-        else:
-            for event in events[:25]:  # Limit events
-                if not isinstance(event, dict): continue
-                
+            blocks.append({"type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"No upcoming {event_type} events."}}]}})
+            return blocks
+
+        # FIXED: Sort events by date (earliest first) before processing
+        try:
+            sorted_events = sorted(events, key=lambda x: x.get('date', '9999-12-31'))
+            self.logger.info(f"Sorted {len(sorted_events)} {event_type} events by date (earliest first)")
+        except Exception as e:
+            self.logger.warning(f"Failed to sort {event_type} events: {e}")
+            sorted_events = events
+
+        initial_events = sorted_events[:10]  # Use sorted events
+        remaining_events = sorted_events[10:100]  # Use sorted events
+
+        # Determine which row creation helper and headers to use
+        if event_type == 'ipo':
+            row_creation_func = self._create_ipo_table_rows
+            headers = ["Symbol", "Price Range", "Date"]
+        else:  # earnings
+            row_creation_func = self._create_earnings_table_rows
+            headers = ["Symbol", "EPS Estimate", "Date"]
+
+        # 1. Create and add the table for the initial (visible) events
+        initial_rows = row_creation_func(initial_events)
+        if initial_rows:
+            blocks.append(self._create_calendar_table_block(initial_rows, headers))
+
+        # 2. Create a toggle with a BULLETED LIST for the remaining events
+        if remaining_events:
+            toggle_children = []
+            for event in remaining_events:
                 symbol = event.get('symbol', 'N/A')
                 date = event.get('date', 'TBD')
-                details = event.get('priceRange', 'TBD') if event_type == 'ipo' else f"EPS Est: {event.get('estimate', 'N/A')}"
                 
-                blocks.append({
+                # FIXED: Format date for toggle display
+                try:
+                    formatted_date = datetime.fromisoformat(date.replace('T00:00:00', '')).strftime('%b %d, %Y')
+                except (ValueError, TypeError):
+                    formatted_date = date
+                
+                if event_type == 'ipo':
+                    details = event.get('priceRange', 'TBD')
+                else:
+                    estimate = event.get('estimate')
+                    details = f"EPS Est: {estimate:.4f}" if isinstance(estimate, (int, float)) else "EPS Est: N/A"
+                
+                toggle_children.append({
                     "type": "bulleted_list_item",
-                    "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"{symbol}: {details} ({date})"}}] }
-                })
-        
-        # Return the list of blocks directly, without wrapping them in a toggle
-        return blocks
-
-    def _build_headlines_section(self, headlines: List[Headline]) -> list:
-        """Build top headlines section from database headlines"""
-        blocks = [{
-            "type": "heading_2",
-            "heading_2": {
-                "rich_text": [{
-                    "type": "text",
-                    "text": {"content": "Top Headlines"}
-                }]
-            }
-        }]
-        
-        if not headlines:
-            blocks.append({
-                "type": "callout",
-                "callout": {
-                    "rich_text": [{
-                        "type": "text",
-                        "text": {"content": "No headlines available since midnight"}
-                    }],
-                    "icon": {"emoji": "📰"}
-                }
-            })
-            return blocks
-        
-        # Display headlines as expandable toggles
-        for headline in headlines:
-            headline_text = headline.headline
-            url = headline.url or ""
-            summary = headline.summary or ""
-            score = headline.score or 0
-            commentary = getattr(headline, 'commentary', None) # Safely get the new commentary
-            
-            # 1. Add the headline itself as a heading
-            blocks.append({
-                "type": "heading_3",
-                "heading_3": {
-                    "rich_text": [{"type": "text", "text": {"content": headline_text}, "annotations": {"bold": True}}]
-                }
-            })
-
-            # 2. Add the AI Commentary as a quote (always visible)
-            if commentary:
-                blocks.append({
-                    "type": "quote",
-                    "quote": {
-                        "rich_text": [{"type": "text", "text": {"content": commentary}, "annotations": {"color": "blue"}}]
-                    }
-                })
-            
-            # 3. Build the list of items to put inside the toggle
-            toggle_children = []
-            if summary:
-                toggle_children.append({
-                    "type": "paragraph",
-                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"Summary: {summary}"}}]}
-                })
-            if url:
-                toggle_children.append({
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{
-                            "type": "text",
-                            "text": {
-                                "content": "Source Link",
-                                "link": {"url": url} # <-- The 'link' object is now INSIDE the 'text' object
-                            }
-                        }]
-                    }
-                })
-            if score:
-                toggle_children.append({
-                    "type": "paragraph",
-                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"Impact Score: {score}/10"}}]}
+                    "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"{symbol}: {details} ({formatted_date})"}}] }
                 })
 
-            # 4. Add the toggle only if there are details to hide
             if toggle_children:
                 blocks.append({
                     "type": "toggle",
                     "toggle": {
-                        "rich_text": [{"type": "text", "text": {"content": "Details & Source"}}],
+                        "rich_text": [{"type": "text", "text": {"content": f"Show {len(remaining_events)} More Events..."}}],
                         "children": toggle_children
                     }
                 })
-            
-            # 5. Add a divider to separate from the next headline
-            blocks.append({"type": "divider", "divider": {}})
-
+        
         return blocks
+
+    def _create_calendar_table_block(self, table_rows: List[Dict], headers: List[str]) -> Dict:
+        """Helper function to create a complete Notion table block."""
+        header_cells = [[{"type": "text", "text": {"content": h}, "annotations": {"bold": True}}] for h in headers]
+        return {
+            "type": "table",
+            "table": {
+                "table_width": len(headers), "has_column_header": True, "has_row_header": False,
+                "children": [
+                    {"type": "table_row", "table_row": {"cells": header_cells}},
+                    *table_rows
+                ]
+            }
+        }
+
+    def _create_article_blocks(self, article: dict) -> list:
+        """
+        Creates Notion blocks for a single news article.
+        Returns headline as heading + summary as paragraph.
+        """
+        blocks = []
+        
+        headline_text = article.get('headline', '')
+        summary_text = article.get('summary', '')
+        article_url = article.get('url', '')
+        
+        # Create headline block with link
+        if headline_text:
+            headline_rich_text = [{"type": "text", "text": {"content": headline_text}}]
+            if article_url:
+                headline_rich_text[0]["text"]["link"] = {"url": article_url}
+            
+            blocks.append({
+                "type": "heading_3",
+                "heading_3": {
+                    "rich_text": headline_rich_text
+                }
+            })
+        
+        # Create summary block (if summary exists)
+        if summary_text:
+                        
+            blocks.append({
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{
+                        "type": "text", 
+                        "text": {"content": summary_text},
+                        "annotations": {"color": "gray"}  # Make summary text slightly muted
+                    }]
+                }
+            })
+        
+        return blocks
+
+    def _create_earnings_table_rows(self, events: List[Dict]) -> List[Dict]:
+        """Helper function to create table rows specifically for earnings events."""
+        rows = []
+        for event in events:
+            if not isinstance(event, dict): continue
+            symbol = event.get('symbol', 'N/A')
+            date = event.get('date', 'TBD')
+            estimate = event.get('estimate')
+            details = f"{estimate:.4f}" if isinstance(estimate, (int, float)) else "N/A"
+            
+            # FIXED: Format date properly and USE the formatted date
+            try:
+                formatted_date = datetime.fromisoformat(date.replace('T00:00:00', '')).strftime('%b %d, %Y')
+            except (ValueError, TypeError):
+                formatted_date = date
+
+            rows.append({
+                "type": "table_row",
+                "table_row": {"cells": [
+                    [{"type": "text", "text": {"content": symbol}, "annotations": {"bold": True}}],
+                    [{"type": "text", "text": {"content": details}}],
+                    [{"type": "text", "text": {"content": formatted_date}}]  # FIXED: Use formatted_date
+                ]}
+            })
+        return rows
+        
+    def _create_ipo_table_rows(self, events: List[Dict]) -> List[Dict]:
+        """Helper function to create table rows specifically for IPO events."""
+        rows = []
+        for event in events:
+            if not isinstance(event, dict): continue
+            symbol = event.get('symbol', 'N/A')
+            date = event.get('date', 'TBD')
+            details = event.get('priceRange', 'TBD')
+
+            # FIXED: Format date properly and USE the formatted date
+            try:
+                formatted_date = datetime.fromisoformat(date.replace('T00:00:00', '')).strftime('%b %d, %Y')
+            except (ValueError, TypeError):
+                formatted_date = date
+            
+            rows.append({
+                "type": "table_row",
+                "table_row": {"cells": [
+                    [{"type": "text", "text": {"content": symbol}, "annotations": {"bold": True}}],
+                    [{"type": "text", "text": {"content": details}}],
+                    [{"type": "text", "text": {"content": formatted_date}}]  # FIXED: Use formatted_date
+                ]}
+            })
+        return rows
 
     def update_engagement_metrics(
         self, 
@@ -706,8 +965,6 @@ class NotionPublisher:
         except Exception as e:
             self.logger.error(f"❌ Failed to update engagement for {notion_page_id}: {e}")
             return False
-
-    
     
     def get_client_status(self) -> Dict[str, Any]:
         """
