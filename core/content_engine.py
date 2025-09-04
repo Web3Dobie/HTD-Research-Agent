@@ -283,7 +283,7 @@ class ContentEngine:
             # Step 4: Construct the final, public-facing URL
             final_website_url = f"https://www.dutchbrat.com/briefings?briefing_id={briefing_id}"
             self.logger.info(f"Step 4/7: Constructed public URL: {final_website_url}")
-
+            tweet_url = ""  # Initialize tweet_url to an empty string
             # Step 5, 6, 7: Conditionally publish tweet and update URLs
             if publish_tweet:
                 self.logger.info("publish_tweet is True. Proceeding with tweet publication.")
@@ -321,30 +321,29 @@ class ContentEngine:
                     tweet_url="" # Pass an empty string for the tweet_url
                 )
 
-            # Step 8 (New): Fetch the parsed JSON and cache it in the database
-                try:
-                    self.logger.info(f"Step 8/8: Generating and caching JSON for briefing ID: {briefing_id}")
-                    
-                    # Use the new service to generate the JSON object locally
-                    briefing_json = self.json_caching_service.generate_json_from_payload(
-                        payload=payload,
-                        briefing_id=briefing_id,
-                        notion_page_id=notion_page_id,
-                        final_website_url=final_website_url,
-                        tweet_url=tweet_url
-                    )
+            # --- START OF FIX ---
+            # This entire block is now correctly indented to run AFTER the if/else block.
+            # Step 8: Generate and cache the JSON content locally.
+            try:
+                self.logger.info(f"Step 8/8: Generating and caching JSON for briefing ID: {briefing_id}")
+                
+                briefing_json = self.json_caching_service.generate_json_from_payload(
+                    payload=payload,
+                    briefing_id=briefing_id,
+                    notion_page_id=notion_page_id,
+                    final_website_url=final_website_url,
+                    tweet_url=tweet_url # This now safely uses the initialized variable
+                )
 
-                    # Save the generated JSON directly to the database
-                    if briefing_json:
-                        self.logger.debug(f"Generated JSON object for caching: {briefing_json}")
-                        self.logger.info("Attempting to save JSON to database...")
-                        self.database_service.update_briefing_json_content(briefing_id, briefing_json)
-                        self.logger.info(f"Successfully cached JSON content for briefing ID: {briefing_id}")
-                    else:
-                        self.logger.error("JSON content generation resulted in an empty object. Caching skipped.")
+                if briefing_json:
+                    self.logger.info("Attempting to save JSON to database...")
+                    self.database_service.update_briefing_json_content(briefing_id, briefing_json)
+                else:
+                    self.logger.error("JSON content generation resulted in an empty object. Caching skipped.")
 
-                except Exception as e:
-                    self.logger.error(f"CRITICAL: Failed during local JSON caching step: {e}", exc_info=True)
+            except Exception as e:
+                self.logger.error(f"CRITICAL: Failed during local JSON caching step: {e}", exc_info=True)
+            # --- END OF FIX ---
 
         except Exception as e:
             self.logger.error(f"--- ❌ Briefing pipeline failed for '{briefing_key}': {e} ---", exc_info=True)

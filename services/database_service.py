@@ -582,6 +582,30 @@ class DatabaseService:
         finally:
             cursor.close()
 
+    def get_briefings_missing_json(self) -> list[dict]:
+        """
+        Fetches the id and notion_page_id for all briefings where json_content is NULL.
+        """
+        conn = self.get_connection()
+        # Use RealDictCursor to get results as dictionaries
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            # Assumes your table is named 'briefings' in the 'hedgefund_agent' schema
+            sql = """
+                SELECT id, notion_page_id 
+                FROM hedgefund_agent.briefings 
+                WHERE json_content IS NULL;
+            """
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            self.logger.info(f"Found {len(rows)} briefings with no cached JSON.")
+            return rows
+        except Exception as e:
+            self.logger.error(f"Failed to get briefings missing JSON: {e}")
+            return []
+        finally:
+            cursor.close()
+
     # === System Logging ===
     
     def log_system_event(self, service: str, level: str, message: str, metadata: dict = None):
