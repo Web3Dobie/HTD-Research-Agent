@@ -25,6 +25,7 @@ from config.sentiment_config import SENTIMENT_CONFIG
 from services.briefing_config_service import ConfigService
 from services.market_sentiment_service import ComprehensiveMarketSentimentService
 from services.prompt_augmentation_service import PromptAugmentationService
+from services.json_caching_service import JSONCachingService
 
 class ContentEngine:
     """
@@ -45,7 +46,8 @@ class ContentEngine:
         self.publishing_service = PublishingService()
         self.notion_publisher = NotionPublisher()
         self.telegram_notifier = TelegramNotifier()
-        
+        self.json_caching_service = JSONCachingService()
+
         # Content generators
         try:
             # CommentaryGenerator expects: data_service, gpt_service, market_client, config
@@ -321,23 +323,28 @@ class ContentEngine:
 
             # Step 8 (New): Fetch the parsed JSON and cache it in the database
                 try:
-                    self.logger.info(f"Fetching parsed JSON from website API to cache for briefing ID: {briefing_id}")
-                    # The agent calls its own website's API to get the fully parsed content
-                    async with aiohttp.ClientSession() as session:
-                        website_api_url = f"https://www.dutchbrat.com/api/briefings?briefingId={notion_page_id}"
-                        async with session.get(website_api_url) as response:
-                            if response.ok:
-                                # We need to get the briefing from the 'data' array
-                                api_response = await response.json()
-                                briefing_json = api_response.get('data', [{}])[0]
-                                # Save the parsed content to our new cache column
-                                self.database_service.update_briefing_json_content(briefing_id, briefing_json)
-                            else:
-                                self.logger.error("Failed to fetch parsed JSON for caching.")
-                except Exception as e:
-                    self.logger.error(f"Failed during caching step: {e}")
+                    self.logger.info(f"Step 8/8: Generating and caching JSON for briefing ID: {briefing_id}")
+                    
+                    # Use the new service to generate the JSON object locally
+                    briefing_json = self.json_caching_service.generate_json_from_payload(
+                        payload=payload,
+                        briefing_id=briefing_id,
+                        notion_page_id=notion_page_id,
+                        final_website_url=final_website_url,
+                        tweet_url=tweet_url
+                    )
 
-                    self.logger.info(f"--- ✅ {briefing_key} pipeline completed successfully ---")
+                    # Save the generated JSON directly to the database
+                    if briefing_json:
+                        self.logger.debug(f"Generated JSON object for caching: {briefing_json}")
+                        self.logger.info("Attempting to save JSON to database...")
+                        self.database_service.update_briefing_json_content(briefing_id, briefing_json)
+                        self.logger.info(f"Successfully cached JSON content for briefing ID: {briefing_id}")
+                    else:
+                        self.logger.error("JSON content generation resulted in an empty object. Caching skipped.")
+
+                except Exception as e:
+                    self.logger.error(f"CRITICAL: Failed during local JSON caching step: {e}", exc_info=True)
 
         except Exception as e:
             self.logger.error(f"--- ❌ Briefing pipeline failed for '{briefing_key}': {e} ---", exc_info=True)

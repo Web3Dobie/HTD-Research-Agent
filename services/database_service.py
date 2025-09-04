@@ -6,6 +6,7 @@ import json
 import asyncio
 from datetime import datetime, timedelta, time, timezone
 from typing import List, Dict, Optional
+from psycopg2.extras import Json
 
 # Use absolute imports for the core models
 import sys
@@ -331,28 +332,29 @@ class DatabaseService:
 
     def update_briefing_json_content(self, briefing_id: int, json_content: dict):
         """
-        Saves the fully parsed JSON content of a briefing to the cache column.
+        Updates a briefing record with the pre-parsed JSON content for caching.
+        This version is compatible with your existing connection management.
         """
         conn = self.get_connection()
         cursor = conn.cursor()
+        sql = """
+            UPDATE hedgefund_agent.briefings
+            SET json_content = %s, updated_at = NOW()
+            WHERE id = %s;
+        """
         try:
-            # psycopg2 can automatically convert a Python dict to a JSONB type
-            import json
-            sql = """
-                UPDATE hedgefund_agent.briefings
-                SET json_content = %s
-                WHERE id = %s;
-            """
-            cursor.execute(sql, (json.dumps(json_content), briefing_id))
+            # Use the Json adapter to ensure the dict is correctly serialized.
+            # Your schema is hedgefund_agent.briefings
+            cursor.execute(sql, (Json(json_content), briefing_id))
             conn.commit()
-            self.logger.info(f"Successfully cached JSON content for briefing ID: {briefing_id}")
+            self.logger.info(f"Successfully updated json_content for briefing_id: {briefing_id}")
         except Exception as e:
-            self.logger.error(f"Failed to cache JSON content for briefing ID {briefing_id}: {e}")
-            conn.rollback()
-            raise
+            self.logger.error(f"Database error in update_briefing_json_content for briefing_id {briefing_id}: {e}", exc_info=True)
+            conn.rollback() # Rollback on error
+            raise # Re-raise the exception
         finally:
             cursor.close()
-
+            
     # === Theme Operations ===
     
     def is_duplicate_theme(self, theme: str, hours_back: int = 24) -> bool:
