@@ -70,7 +70,7 @@ class HedgeFundScheduler:
                 self.headline_pipeline = None
         
         # BST/GMT aware scheduling - these are your desired BST times
-        self.bst_briefing_times = ["07:30", "14:07", "16:25", "21:40"]
+        self.bst_briefing_times = ["07:30", "14:07", "16:25", "20:44"]
         self.bst_commentary_times = ["07:00", "08:00", "10:00", "11:00", "15:30", "18:00", "20:00", "22:00", "23:00"]
         
         # Calculate BST status once during initialization
@@ -278,12 +278,12 @@ class HedgeFundScheduler:
         # === DEEP DIVE THREADS ===
         for day in self.deep_dive_days:
             job_name = f"deep_dive_{day.lower()}"
-            getattr(schedule.every(), day.lower()).at("21:00").do(  # 22:00 BST = 21:00 UTC
+            getattr(schedule.every(), day.lower()).at("22:30").do(  # 22:00 BST = 21:00 UTC
                 self._safe_job_wrapper(job_name, self._run_deep_dive)
             )
         
         # === WEEKEND SCHEDULE ===
-        weekend_briefings = ["opening", "midday", "close"]  # 3 briefings only
+        weekend_briefings = ["crypto", "technical", "fundamental"]  # 3 briefings only
         weekend_commentary_times = utc_commentary_times[:6]  # 6 commentary posts only
         
         for day in ["saturday", "sunday"]:
@@ -307,7 +307,7 @@ class HedgeFundScheduler:
             
             # Weekend deep dive
             job_name = f"deep_dive_{day}"
-            getattr(schedule.every(), day).at("21:00").do(
+            getattr(schedule.every(), day).at("22:30").do(
                 self._safe_job_wrapper(job_name, self._run_deep_dive)
             )
         

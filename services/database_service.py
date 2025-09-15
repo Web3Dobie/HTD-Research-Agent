@@ -333,25 +333,22 @@ class DatabaseService:
     def update_briefing_json_content(self, briefing_id: int, json_content: dict):
         """
         Updates a briefing record with the pre-parsed JSON content for caching.
-        This version is compatible with your existing connection management.
         """
         conn = self.get_connection()
         cursor = conn.cursor()
         sql = """
             UPDATE hedgefund_agent.briefings
-            SET json_content = %s, updated_at = NOW()
+            SET json_content = %s
             WHERE id = %s;
         """
         try:
-            # Use the Json adapter to ensure the dict is correctly serialized.
-            # Your schema is hedgefund_agent.briefings
             cursor.execute(sql, (Json(json_content), briefing_id))
             conn.commit()
             self.logger.info(f"Successfully updated json_content for briefing_id: {briefing_id}")
         except Exception as e:
             self.logger.error(f"Database error in update_briefing_json_content for briefing_id {briefing_id}: {e}", exc_info=True)
-            conn.rollback() # Rollback on error
-            raise # Re-raise the exception
+            conn.rollback()
+            raise
         finally:
             cursor.close()
             
@@ -603,6 +600,41 @@ class DatabaseService:
         except Exception as e:
             self.logger.error(f"Failed to get briefings missing JSON: {e}")
             return []
+        finally:
+            cursor.close()
+
+    def log_content_generation(self, content_type: str, theme: str, headline_id: Optional[int], success: bool, url: Optional[str] = None, details: Optional[Dict] = None):
+        """
+        Logs the result of a content generation event to the database.
+        This method was missing, causing the 'AttributeError'.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        # Assumes a table named 'content_log' exists in the 'hedgefund_agent' schema
+        sql = """
+            INSERT INTO hedgefund_agent.content_log 
+            (content_type, theme, headline_id, success, url, details, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s);
+        """
+        try:
+            # Convert details dictionary to a JSON string for the database
+            details_json = json.dumps(details) if details else None
+            
+            cursor.execute(sql, (
+                content_type, 
+                theme, 
+                headline_id, 
+                success, 
+                url, 
+                details_json, 
+                datetime.now(timezone.utc)
+            ))
+            conn.commit()
+            self.logger.info(f"Logged content generation for theme '{theme}' with status: {success}")
+        except Exception as e:
+            self.logger.error(f"Failed to log content generation for theme '{theme}': {e}", exc_info=True)
+            conn.rollback()
+            # We do not re-raise here, as a logging failure should not halt the main process.
         finally:
             cursor.close()
 

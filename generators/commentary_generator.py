@@ -7,6 +7,7 @@ import os
 from typing import Optional, List, Dict, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
+from services.enrichment_service import MarketDataEnrichmentService
 
 # Notion client for memory
 try:
@@ -36,6 +37,7 @@ class CommentaryGenerator:
         self.gpt_service = gpt_service
         self.market_client = market_client
         self.config = config
+        self.enrichment_service = MarketDataEnrichmentService(self.market_client)
         
         # Initialize Notion memory if available
         self.notion_client = None
@@ -121,7 +123,7 @@ class CommentaryGenerator:
             market_data = []
             
             if request and request.include_market_data:
-                enriched_text, market_data = await self._enrich_with_market_data(base_text)
+                enriched_text, market_data = await self.enrichment_service.enrich_content(base_text)
             
             # 8. Add mentions and disclaimer
             final_text = self._finalize_text(enriched_text)
@@ -471,40 +473,6 @@ class CommentaryGenerator:
         }
         
         return category_prompts.get(category, category_prompts[ContentCategory.MACRO])
-    
-    async def _enrich_with_market_data(self, text: str) -> tuple[str, List[MarketData]]:
-        """Enrich text with market data for mentioned tickers"""
-        # Extract cashtags
-        cashtags = re.findall(r'\$([A-Z]{1,5})', text)
-        
-        if not cashtags:
-            return text, []
-        
-        market_data = []
-        enriched_text = text
-        
-        for ticker in cashtags:
-            try:
-                # Get market data
-                price_data = await self.market_client.get_price(ticker)
-                
-                if price_data:
-                    market_data.append(MarketData(
-                        ticker=ticker,
-                        price=price_data['price'],
-                        change_percent=price_data['change_percent']
-                    ))
-                    
-                    # Replace cashtag with enriched version
-                    enriched_text = enriched_text.replace(
-                        f"${ticker}",
-                        f"${ticker} (${price_data['price']:.2f}, {price_data['change_percent']:+.2f}%)"
-                    )
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to get market data for {ticker}: {e}")
-        
-        return enriched_text, market_data
     
     def _finalize_text(self, text: str) -> str:
         """Add mentions and disclaimer to final text"""

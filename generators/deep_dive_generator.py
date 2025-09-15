@@ -3,6 +3,7 @@ import logging
 import re
 from typing import Optional, List
 from datetime import datetime
+from services.enrichment_service import MarketDataEnrichmentService
 
 # Import services and models from the new architecture
 from core.models import (
@@ -21,6 +22,7 @@ class DeepDiveGenerator:
         self.gpt_service = gpt_service
         self.market_client = market_client
         self.config = config
+        self.enrichment_service = MarketDataEnrichmentService(self.market_client)
         
         # Category rotation tracking (same as CommentaryGenerator)
         self.last_used_category = None
@@ -73,7 +75,7 @@ class DeepDiveGenerator:
                 raise Exception("GPT thread generation failed or returned no parts")
 
             # 4. Enrich all thread parts with market data
-            enriched_parts, market_data = await self._enrich_with_market_data(thread_parts)
+            enriched_parts, market_data = await self.enrichment_service.enrich_content(thread_parts)
 
             # 5. Add mentions and disclaimer to the last part only
             enriched_parts = self._finalize_thread_parts(enriched_parts)
@@ -126,82 +128,11 @@ class DeepDiveGenerator:
             f"**News Context:**\n{context}\n\n"
             f"**Instructions:**\n{base_instruction}\n"
             "Structure the thread as follows:\n"
-            "1. **The News:** Briefly explain what happened and why it's significant.\n"
-            "2. **Market Impact:** Analyze what the market cares about. Focus on second-order effects.\n"
-            "3. **Your Take:** Provide a sharp, analytical conclusion (e.g., macro implications, sector rotation, stock-specific view).\n\n"
+            "1. The News 📰: Briefly explain what happened and why it's significant.\n"
+            "2. Market Impact ➡️: Analyze what the market cares about. Focus on second-order effects.\n"
+            "3. Our Take 🧐: Provide a sharp, analytical conclusion (e.g., macro implications, sector rotation, stock-specific view).\n\n"
             "Be institutional, analytical, and avoid hype."
         )
-
-    async def _enrich_with_market_data(self, parts: List[str]) -> tuple[List[str], List[MarketData]]:
-        """
-        Finds all unique cashtags across all thread parts, fetches their market data,
-        and replaces the cashtags with enriched data in each part.
-        """
-        # Extract all unique cashtags from the entire thread
-        all_cashtags = set()
-        for part in parts:
-            cashtags_in_part = self._extract_cashtags(part)
-            all_cashtags.update(cashtags_in_part)
-
-        # Filter to valid tickers
-        valid_tickers = [tag.strip("$") for tag in all_cashtags if self._is_valid_ticker(tag.strip("$"))]
-        
-        if not valid_tickers:
-            logger.info("📊 No valid tickers found in thread parts")
-            return parts, []
-
-        logger.info(f"💰 Enriching deep dive with market data for: {valid_tickers}")
-        
-        # Get market data for all tickers in bulk
-        market_data_objects = []
-        prices = {}
-        
-        try:
-            # Use bulk price endpoint
-            bulk_prices = await self.market_client.get_bulk_prices(valid_tickers)
-            
-            for ticker, data in bulk_prices.items():
-                if data and data.price > 0:
-                    prices[f"${ticker}"] = data
-                    market_data_objects.append(data)
-                    
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to get bulk prices: {e}")
-            # Try individual prices as fallback
-            for ticker in valid_tickers:
-                try:
-                    price_data = await self.market_client.get_price(ticker)
-                    if price_data and price_data.price > 0:
-                        prices[f"${ticker}"] = price_data
-                        market_data_objects.append(price_data)
-                except Exception as e:
-                    logger.warning(f"❌ Failed to get price for {ticker}: {e}")
-                    continue
-
-        # Replace cashtags in each part with enriched format
-        enriched_parts = []
-        for part in parts:
-            enriched_part = part
-            for cashtag, data in prices.items():
-                if data:
-                    enriched_format = f"{cashtag} (${data.price:.2f}, {data.change_percent:+.2f}%)"
-                    # Use regex for safe replacement (whole word only)
-                    pattern = rf"{re.escape(cashtag)}(?=\s|$|[^\w])"
-                    enriched_part = re.sub(pattern, enriched_format, enriched_part)
-            enriched_parts.append(enriched_part)
-
-        logger.info(f"✅ Successfully enriched {len(market_data_objects)} tickers in deep dive")
-        return enriched_parts, market_data_objects
-
-    def _extract_cashtags(self, text: str) -> List[str]:
-        """Extract cashtags from text"""
-        pattern = r'\$[A-Z]{1,5}\b'
-        return re.findall(pattern, text, re.IGNORECASE)
-
-    def _is_valid_ticker(self, ticker: str) -> bool:
-        """Basic ticker validation"""
-        return (len(ticker) >= 1 and len(ticker) <= 5 and 
-                ticker.isalpha() and ticker.isupper())
 
     def _finalize_thread_parts(self, parts: List[str]) -> List[str]:
         """Add mentions and disclaimer to thread parts (only disclaimer on last part)"""

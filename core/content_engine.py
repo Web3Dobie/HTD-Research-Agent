@@ -402,6 +402,8 @@ class ContentEngine:
         
         return tweet_text
 
+    # core/content_engine.py
+
     async def _log_content_and_results(
         self, 
         content: GeneratedContent, 
@@ -410,27 +412,40 @@ class ContentEngine:
     ):
         """Log content and publishing results to database"""
         try:
-            # Save to database for analytics
+            # This dictionary now serves as the rich 'details' blob for our log.
+            # It's good practice to make datetime objects JSON serializable.
             content_record = {
                 'content_type': content.content_type.value,
                 'category': content.category.value if content.category else None,
                 'theme': content.theme,
                 'text': content.text,
                 'headline_id': content.headline_used.id if content.headline_used else None,
-                'market_data': [data.__dict__ if hasattr(data, '__dict__') else data for data in content.market_data] if content.market_data else [],
-                'published': twitter_result.success,
+                'market_data': [data.__dict__ for data in content.market_data] if content.market_data else [],
+                'success': twitter_result.success,
                 'tweet_id': twitter_result.tweet_id,
                 'tweet_url': twitter_result.url,
                 'notion_page_id': notion_page_id,
-                'created_at': datetime.now(timezone.utc)
+                'created_at': datetime.now(timezone.utc).isoformat()
             }
             
-            await self.database_service.log_content_generation(content_record)
+            # FIX: Call the database service method with the correct arguments as defined
+            # in database_service.py. The entire 'content_record' is passed as 'details'.
+            await asyncio.to_thread(
+                self.database_service.log_content_generation,
+                content_type=content.content_type.value,
+                theme=content.theme,
+                headline_id=content.headline_used.id if content.headline_used else None,
+                success=twitter_result.success,
+                url=twitter_result.url,
+                details=content_record
+            )
             
-            # Update theme usage if content was published successfully
             if twitter_result.success:
-                await self.database_service.update_theme_usage(content.theme)
-            
+                await asyncio.to_thread(
+                    self.database_service.track_theme, 
+                    content.theme
+                )
+                
             self.logger.info(f"📝 Logged content and publishing results to database")
             
         except Exception as e:
