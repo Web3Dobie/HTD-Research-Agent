@@ -14,9 +14,18 @@ DATABASE_CONFIG = {
     'password': os.getenv('DB_PASSWORD', 'secure_agents_password')
 }
 
-# Only require SSL for remote connections
-if DATABASE_CONFIG['host'] not in ['localhost', '127.0.0.1']:
+# Handle SSL configuration with environment override
+db_sslmode = os.getenv('DB_SSLMODE', 'auto')
+if db_sslmode == 'disable':
+    # Explicitly disable SSL
+    DATABASE_CONFIG['sslmode'] = 'disable'
+elif db_sslmode == 'require':
+    # Explicitly require SSL
     DATABASE_CONFIG['sslmode'] = 'require'
+else:
+    # Auto mode: only require SSL for remote connections
+    if DATABASE_CONFIG['host'] not in ['localhost', '127.0.0.1']:
+        DATABASE_CONFIG['sslmode'] = 'require'
 
 # Agent configuration
 AGENT_NAME = "hedgefund_agent"

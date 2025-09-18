@@ -1,11 +1,10 @@
-# Database (new)
+# Database
 psycopg2-binary>=2.9.0
 python-dotenv>=1.0.0
 
-# Core framework (from original)
+# Core framework
 matplotlib
 pandas
-pandas-ta
 requests
 schedule
 notion-client
@@ -19,16 +18,11 @@ beautifulsoup4
 
 # Financial data
 yfinance
-tvscreener
+# tvscreener  # Comment out if causing issues
 
 # Web and API
 fastapi
 uvicorn
-
-# Azure services
-azure-storage-blob
-azure-identity
-azure-keyvault-secrets
 
 # PDF generation
 fpdf2
@@ -56,6 +50,4 @@ trading-ig>=0.0.18
 setuptools
 cloudscraper
 munch
-
-aiohttp>=3.8.
-psycopg2-binary
+aiohttp>=3.8.0
