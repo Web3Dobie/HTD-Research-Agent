@@ -27,14 +27,42 @@ class DatabaseService:
     
     def get_connection(self):
         """Get database connection (create if needed)"""
-        if self._connection is None or self._connection.closed:
-            try:
+        try:
+            # Check if connection exists and is usable
+            if self._connection is None or self._connection.closed:
                 self._connection = psycopg2.connect(**self.db_config)
                 logger.info("✅ Connected to PostgreSQL")
-            except Exception as e:
-                logger.error(f"❌ Database connection failed: {e}")
-                raise
-        return self._connection
+        
+            # Test the connection with a simple query
+            cursor = self._connection.cursor()
+            cursor.execute("SELECT 1")
+            cursor.close()
+        
+            return self._connection
+        
+        except psycopg2.errors.InFailedSqlTransaction:
+            # Connection is in failed state - force recreation
+            logger.warning("🔄 Transaction failed, recreating connection")
+            if self._connection:
+                try:
+                    self._connection.close()
+                except:
+                    pass
+            self._connection = psycopg2.connect(**self.db_config)
+            logger.info("✅ Reconnected to PostgreSQL after transaction failure")
+            return self._connection
+        
+        except Exception as e:
+            logger.error(f"❌ Database connection failed: {e}")
+            # Force recreation on any connection error
+            if self._connection:
+                try:
+                    self._connection.close()
+                except:
+                    pass
+            self._connection = None
+            
+            raise
     
     def close_connection(self):
         """Close database connection"""
