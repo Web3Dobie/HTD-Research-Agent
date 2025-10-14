@@ -1,44 +1,80 @@
+# services/json_caching_service.py
+"""
+JSONCachingService - Complete rewrite for full briefing data capture.
+Generates JSON structure matching the exact Notion page layout for frontend consumption.
+"""
+
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
-from core.models import BriefingPayload
+from core.models import BriefingPayload, Headline
 
-# A helper to create the rich_text structure the frontend expects
-def _create_rich_text(text: str) -> List[Dict]:
-    """Creates a simple, unformatted rich_text list object."""
-    return [{"type": "text", "text": text, "annotations": {"bold": False, "italic": False, "strikethrough": False, "underline": False, "code": False, "color": "default"}, "href": None}]
+logger = logging.getLogger(__name__)
 
-# A helper to create a table from headers and data, and then sort it.
-def _create_sorted_data_table(table_name: str, headers: List[str], data_rows: List[Dict]) -> Dict:
-    """Creates a complete, sorted table block for the JSON cache."""
+
+def _create_rich_text(text: str, href: Optional[str] = None, bold: bool = False, italic: bool = False, color: str = "default") -> List[Dict]:
+    """Creates a rich_text structure matching Notion's format."""
+    rich_text_obj = {
+        "type": "text",
+        "text": text,
+        "annotations": {
+            "bold": bold,
+            "italic": italic,
+            "strikethrough": False,
+            "underline": False,
+            "code": False,
+            "color": color
+        },
+        "href": href
+    }
+    return [rich_text_obj]
+
+
+def _create_sorted_data_table(headers: List[str], data_rows: List[Dict]) -> Optional[Dict]:
+    """Creates a complete, sorted table block with color support."""
     if not data_rows:
         return None
 
-    # Helper to clean and parse performance strings (e.g., "+1.5%", "-10 bps")
-    def clean_and_parse(text: str) -> float:
+    def clean_and_parse(value) -> float:
+        """Parse performance values for sorting."""
+        # Handle both string and dict values
+        text = value.get('text', value) if isinstance(value, dict) else value
         try:
-            cleaned = text.lower().replace('%', '').replace('bps', '').strip()
+            cleaned = str(text).lower().replace('%', '').replace('bps', '').replace('market closed', '0').strip()
             return float(cleaned)
         except (ValueError, TypeError):
-            return -float('inf') # Return a very small number if parsing fails
+            return -float('inf')
 
-    # Find the performance column to sort by (e.g., 'Change', 'Change in Yield')
+    # Find the performance column to sort by
     perf_column_key = next((h for h in headers if 'change' in h.lower()), headers[-1])
     
-    # Sort the data rows
+    # Sort the data rows by performance (descending)
     sorted_data_rows = sorted(data_rows, key=lambda x: clean_and_parse(x.get(perf_column_key, '')), reverse=True)
 
-    # Build the table structure
+    # Build header row
     header_row = {
         "type": "table_row",
-        "content": {"cells": [_create_rich_text(h) for h in headers]}
+        "content": {"cells": [_create_rich_text(h, bold=True) for h in headers]}
     }
     
+    # Build data rows
     table_children = [header_row]
     for row_data in sorted_data_rows:
+        cells = []
+        for header in headers:
+            value = row_data.get(header, '')
+            
+            # Check if value is a dict with color metadata
+            if isinstance(value, dict):
+                text = value.get('text', '')
+                color = value.get('color', 'default')
+                cells.append(_create_rich_text(str(text), color=color))
+            else:
+                cells.append(_create_rich_text(str(value)))
+        
         table_children.append({
             "type": "table_row",
-            "content": {"cells": [_create_rich_text(str(row_data.get(h, ''))) for h in headers]}
+            "content": {"cells": cells}
         })
 
     return {
@@ -47,301 +83,78 @@ def _create_sorted_data_table(table_name: str, headers: List[str], data_rows: Li
         "children": table_children
     }
 
+
 class JSONCachingService:
+    """Service to generate cached JSON from BriefingPayload matching exact Notion page layout."""
+    
     def __init__(self):
         self.logger = logging.getLogger(__name__)
 
-    def generate_json_from_payload(self, payload: BriefingPayload, briefing_id: int, notion_page_id: str, final_website_url: str, tweet_url: str) -> Dict[str, Any]:
+    def generate_json_from_payload(
+        self, 
+        payload: BriefingPayload, 
+        briefing_id: int, 
+        notion_page_id: str, 
+        final_website_url: str, 
+        tweet_url: str
+    ) -> Dict[str, Any]:
         """
-        FIXED: Takes the generated BriefingPayload and transforms it into the final
-        JSON structure expected by the frontend, ready for caching.
-        Now uses the correct BriefingPayload structure.
+        Generates complete JSON structure from BriefingPayload.
+        Matches exact Notion page layout order.
         """
-        self.logger.info(f"Generating JSON cache for briefing_id: {briefing_id}")
+        self.logger.info(f"🔧 Generating JSON cache for briefing_id: {briefing_id}")
         
         content_blocks = []
         
-        # 1. Market Sentiment Header
-        if payload.market_analysis:
-            sentiment_emoji = {
-                "BULLISH": "🐂", "BEARISH": "🐻", 
-                "NEUTRAL": "📊", "MIXED": "⚖️"
-            }.get(payload.market_analysis.sentiment.value, "📊")
-            
-            content_blocks.append({
-                "type": "heading_1", 
-                "content": {"richText": _create_rich_text(f"Global Market Sentiment: {payload.market_analysis.sentiment.value} {sentiment_emoji}")}
-            })
-            
-            if payload.market_analysis.market_summary:
-                content_blocks.append({
-                    "type": "quote", 
-                    "content": {"richText": _create_rich_text(payload.market_analysis.market_summary)}
-                })
+        # ============================================================
+        # 1. GLOBAL MARKET SENTIMENT
+        # ============================================================
+        content_blocks.extend(self._build_sentiment_header(payload))
         
-        # 2. Market Performance Dashboard
-        content_blocks.append({
-            "type": "heading_2", 
-            "content": {"richText": _create_rich_text("Market Performance Dashboard")}
-        })
+        # ============================================================
+        # 2. MARKET PERFORMANCE DASHBOARD
+        # ============================================================
+        content_blocks.extend(self._build_market_performance_dashboard(payload))
         
-        if payload.raw_market_data:
-            # Create sections for each market data category (excluding top movers)
-            for section_name, section_data in payload.raw_market_data.items():
-                if section_name in ['top_gainers', 'top_losers']:
-                    continue  # Handle these separately
-                    
-                if section_data:
-                    # Get section title from config or format section name
-                    section_config = payload.config.get('market_data_sections', {}).get(section_name, {})
-                    section_title = section_config.get('title', section_name.replace('_', ' ').title())
-                    
-                    content_blocks.append({
-                        "type": "heading_3", 
-                        "content": {"richText": _create_rich_text(section_title)}
-                    })
-                    
-                    # Convert market data to table format
-                    is_rates_section = 'yield' in section_title.lower() or section_name == 'rates'
-                    
-                    if is_rates_section:
-                        headers = ["Instrument", "Change in Yield"]
-                        table_data = []
-                        for item in section_data:
-                            display_name = item.get('display_name', item.get('symbol', 'N/A'))
-                            change_percent = item.get('change_percent', 0)
-                            
-                            # Estimate basis points change for rates
-                            if '2Y' in display_name: 
-                                multiplier = -40
-                            elif '10Y' in display_name: 
-                                multiplier = -17
-                            else: 
-                                multiplier = -20
-                            change_bps = change_percent * multiplier
-                            
-                            table_data.append({
-                                "Instrument": display_name,
-                                "Change in Yield": f"{change_bps:+.0f} bps"
-                            })
-                    else:
-                        headers = ["Instrument", "Level", "Change"]
-                        table_data = []
-                        for item in section_data:
-                            display_name = item.get('display_name', item.get('symbol', 'N/A'))
-                            price = item.get('price', 0)
-                            change_percent = item.get('change_percent', 0)
-                            
-                            # Format price with currency symbol if appropriate
-                            if 'USD' in item.get('symbol', '') or item.get('symbol', '').startswith('$'):
-                                price_formatted = f"${price:,.2f}"
-                            else:
-                                price_formatted = f"{price:,.2f}"
-                            
-                            table_data.append({
-                                "Instrument": display_name,
-                                "Level": price_formatted,
-                                "Change": f"{change_percent:+.2f}%"
-                            })
-                    
-                    table = _create_sorted_data_table(section_name, headers, table_data)
-                    if table:
-                        content_blocks.append(table)
-
-        # 3. Key Market Drivers
-        if payload.market_analysis and payload.market_analysis.key_drivers:
-            content_blocks.append({
-                "type": "heading_2", 
-                "content": {"richText": _create_rich_text("Key Market Drivers")}
-            })
-            
-            for driver in payload.market_analysis.key_drivers:
-                content_blocks.append({
-                    "type": "bulleted_list_item",
-                    "content": {"richText": _create_rich_text(driver)}
-                })
-
-        # 4. Top Headlines (FIXED: use top_headlines)
-        if payload.top_headlines:
-            content_blocks.append({
-                "type": "heading_2", 
-                "content": {"richText": _create_rich_text("Top Headlines")}
-            })
-            
-            for headline in payload.top_headlines:
-                content_blocks.append({
-                    "type": "heading_3", 
-                    "content": {"richText": _create_rich_text(headline.headline)}
-                })
-                
-                if hasattr(headline, 'commentary') and headline.commentary:
-                    content_blocks.append({
-                        "type": "quote", 
-                        "content": {"richText": _create_rich_text(headline.commentary)}
-                    })
-                
-                # Add summary and source in a toggle
-                if headline.summary or headline.url or headline.score:
-                    toggle_children = []
-                    if headline.summary:
-                        toggle_children.append({
-                            "type": "paragraph",
-                            "content": {"richText": _create_rich_text(f"Summary: {headline.summary}")}
-                        })
-                    if headline.url:
-                        toggle_children.append({
-                            "type": "paragraph",
-                            "content": {"richText": [{"type": "text", "text": "Source Link", "href": headline.url}]}
-                        })
-                    if headline.score:
-                        toggle_children.append({
-                            "type": "paragraph",
-                            "content": {"richText": _create_rich_text(f"Impact Score: {headline.score}/10")}
-                        })
-                    
-                    if toggle_children:
-                        content_blocks.append({
-                            "type": "toggle",
-                            "content": {"richText": _create_rich_text("Details & Source")},
-                            "children": toggle_children
-                        })
-                
-                content_blocks.append({"type": "divider", "content": {}})
-
-        # 5. Top Movers (FIXED: use correct attributes)
+        # ============================================================
+        # 3. TOP GAINERS/LOSERS (for pre-market and US close only)
+        # ============================================================
         if payload.top_gainers or payload.top_losers:
-            content_blocks.append({
-                "type": "heading_2", 
-                "content": {"richText": _create_rich_text("Top Market Movers")}
-            })
-            
-            # Create two-column layout for gainers and losers
-            mover_columns = []
-            
-            if payload.top_gainers:
-                gainers_data = []
-                for item in payload.top_gainers:
-                    gainers_data.append({
-                        "Symbol": item.get('symbol', 'N/A'),
-                        "Price": f"${item.get('price', 0):.2f}",
-                        "Change": f"{item.get('change_percent', 0):+.2f}%"
-                    })
-                
-                gainers_table = _create_sorted_data_table("Top Gainers", ["Symbol", "Price", "Change"], gainers_data)
-                if gainers_table:
-                    gainers_column = {
-                        "type": "column",
-                        "children": [
-                            {"type": "heading_3", "content": {"richText": _create_rich_text("📈 Top 5 Gainers")}},
-                            gainers_table
-                        ]
-                    }
-                    mover_columns.append(gainers_column)
-
-            if payload.top_losers:
-                losers_data = []
-                for item in payload.top_losers:
-                    losers_data.append({
-                        "Symbol": item.get('symbol', 'N/A'),
-                        "Price": f"${item.get('price', 0):.2f}",
-                        "Change": f"{item.get('change_percent', 0):+.2f}%"
-                    })
-                
-                losers_table = _create_sorted_data_table("Top Losers", ["Symbol", "Price", "Change"], losers_data)
-                if losers_table:
-                    losers_column = {
-                        "type": "column",
-                        "children": [
-                            {"type": "heading_3", "content": {"richText": _create_rich_text("📉 Top 5 Losers")}},
-                            losers_table
-                        ]
-                    }
-                    mover_columns.append(losers_column)
-            
-            # Add empty column if only one mover type exists
-            if len(mover_columns) == 1:
-                mover_columns.append({"type": "column", "children": []})
-            
-            if mover_columns:
-                content_blocks.append({"type": "column_list", "children": mover_columns})
-
-        # 6. Economic Calendar
-        if payload.earnings_calendar or payload.ipo_calendar:
-            content_blocks.append({
-                "type": "heading_2", 
-                "content": {"richText": _create_rich_text("📅 Economic Calendar")}
-            })
-            
-            calendar_columns = []
-            
-            # Earnings Calendar
-            if payload.earnings_calendar:
-                earnings_data = []
-                for event in payload.earnings_calendar[:10]:  # Limit to 10 events
-                    symbol = event.get('symbol', 'N/A')
-                    date = event.get('date', 'TBD')
-                    estimate = event.get('estimate')
-                    
-                    # Format date
-                    try:
-                        formatted_date = datetime.fromisoformat(date.replace('T00:00:00', '')).strftime('%b %d')
-                    except (ValueError, TypeError):
-                        formatted_date = date
-                    
-                    earnings_data.append({
-                        "Symbol": symbol,
-                        "EPS Est": f"{estimate:.4f}" if isinstance(estimate, (int, float)) else "N/A",
-                        "Date": formatted_date
-                    })
-                
-                earnings_table = _create_sorted_data_table("Earnings", ["Symbol", "EPS Est", "Date"], earnings_data)
-                if earnings_table:
-                    calendar_columns.append({
-                        "type": "column",
-                        "children": [
-                            {"type": "heading_3", "content": {"richText": _create_rich_text("📊 Earnings Calendar")}},
-                            earnings_table
-                        ]
-                    })
-            
-            # IPO Calendar
-            if payload.ipo_calendar:
-                ipo_data = []
-                for event in payload.ipo_calendar[:10]:  # Limit to 10 events
-                    symbol = event.get('symbol', 'N/A')
-                    date = event.get('date', 'TBD')
-                    price_range = event.get('priceRange', 'TBD')
-                    
-                    # Format date
-                    try:
-                        formatted_date = datetime.fromisoformat(date.replace('T00:00:00', '')).strftime('%b %d')
-                    except (ValueError, TypeError):
-                        formatted_date = date
-                    
-                    ipo_data.append({
-                        "Symbol": symbol,
-                        "Price Range": price_range,
-                        "Date": formatted_date
-                    })
-                
-                ipo_table = _create_sorted_data_table("IPOs", ["Symbol", "Price Range", "Date"], ipo_data)
-                if ipo_table:
-                    calendar_columns.append({
-                        "type": "column",
-                        "children": [
-                            {"type": "heading_3", "content": {"richText": _create_rich_text("🗓️ IPO Calendar")}},
-                            ipo_table
-                        ]
-                    })
-            
-            # Add empty column if only one calendar type exists
-            if len(calendar_columns) == 1:
-                calendar_columns.append({"type": "column", "children": []})
-            
-            if calendar_columns:
-                content_blocks.append({"type": "column_list", "children": calendar_columns})
-
-        # Final JSON Assembly (FIXED: use correct attributes)
+            content_blocks.extend(self._build_top_movers_section(payload))
+        
+        # ============================================================
+        # 4. KEY MARKET DRIVERS
+        # ============================================================
+        content_blocks.extend(self._build_key_drivers(payload))
+        
+        # ============================================================
+        # 5. ECONOMIC CALENDAR (Earnings + IPO)
+        # ============================================================
+        content_blocks.extend(self._build_calendar_section(payload))
+        
+        # ============================================================
+        # 6. ECONOMIC CALENDAR WIDGET
+        # ============================================================
+        content_blocks.extend(self._build_calendar_widget())
+        
+        # ============================================================
+        # 7. HEADLINES SECTION (Stock-Specific News OR General Headlines)
+        # ============================================================
+        content_blocks.extend(self._build_headlines_section(payload))
+        
+        # ============================================================
+        # 8. DETAILED SECTION ANALYSIS
+        # ============================================================
+        content_blocks.extend(self._build_detailed_analysis(payload))
+        
+        # ============================================================
+        # 9. DISCLAIMER/FOOTER
+        # ============================================================
+        content_blocks.extend(self._build_disclaimer())
+        
+        # ============================================================
+        # FINAL JSON ASSEMBLY
+        # ============================================================
         final_json = {
             "id": notion_page_id,
             "title": payload.config.get('briefing_title', 'Market Briefing'),
@@ -349,9 +162,641 @@ class JSONCachingService:
             "date": datetime.utcnow().strftime('%Y-%m-%d'),
             "pageUrl": final_website_url,
             "tweetUrl": tweet_url,
-            "marketSentiment": payload.market_analysis.sentiment.value if payload.market_analysis else "",
-            "content": [block for block in content_blocks if block]
+            "marketSentiment": payload.market_analysis.sentiment.value if payload.market_analysis else "NEUTRAL",
+            "content": [block for block in content_blocks if block]  # Filter out None blocks
         }
         
-        self.logger.info(f"Generated JSON with {len(content_blocks)} content blocks")
+        self.logger.info(f"✅ Generated JSON with {len(content_blocks)} content blocks")
         return final_json
+
+    # ============================================================
+    # SECTION BUILDERS
+    # ============================================================
+
+    def _build_sentiment_header(self, payload: BriefingPayload) -> List[Dict]:
+        """Builds the Global Market Sentiment header section."""
+        blocks = []
+        
+        if not payload.market_analysis:
+            return blocks
+        
+        analysis = payload.market_analysis
+        sentiment_emoji = {
+            "BULLISH": "🐂",
+            "BEARISH": "🐻",
+            "NEUTRAL": "📊",
+            "MIXED": "⚖️"
+        }.get(analysis.sentiment.value, "📊")
+        
+        # Sentiment heading
+        blocks.append({
+            "type": "heading_1",
+            "content": {"richText": _create_rich_text(
+                f"Global Market Sentiment: {analysis.sentiment.value} {sentiment_emoji}",
+                bold=True
+            )}
+        })
+        
+        # Market summary quote
+        if analysis.market_summary:
+            blocks.append({
+                "type": "quote",
+                "content": {"richText": _create_rich_text(analysis.market_summary)}
+            })
+        
+        return blocks
+
+    def _build_market_performance_dashboard(self, payload: BriefingPayload) -> List[Dict]:
+        """Builds the Market Performance Dashboard with all market data sections."""
+        blocks = []
+        
+        blocks.append({
+            "type": "heading_2",
+            "content": {"richText": _create_rich_text("Market Performance Dashboard", bold=True)}
+        })
+        
+        if not payload.raw_market_data:
+            blocks.append({
+                "type": "paragraph",
+                "content": {"richText": _create_rich_text("Market data not available.")}
+            })
+            return blocks
+        
+        # Build tables for each market section (excluding top movers)
+        section_blocks = []
+        for section_name, section_data in payload.raw_market_data.items():
+            if section_name in ['top_gainers', 'top_losers']:
+                continue  # These are handled separately
+            
+            if not section_data:
+                continue
+            
+            section_config = payload.config.get('market_data_sections', {}).get(section_name, {})
+            section_title = section_config.get('title', section_name.replace('_', ' ').title())
+            
+            # Section heading
+            section_block_group = [{
+                "type": "heading_3",
+                "content": {"richText": _create_rich_text(section_title, bold=True)}
+            }]
+            
+            # Build table
+            is_rates_section = 'yield' in section_title.lower() or section_name == 'rates'
+            
+            if is_rates_section:
+                headers = ["Instrument", "Change in Yield"]
+                table_data = []
+                for item in section_data:
+                    display_name = item.get('display_name', item.get('symbol', 'N/A'))
+                    change_percent = item.get('change_percent', 0)
+                    market_status = item.get('market_status', 'OPEN').upper()
+                    
+                    if market_status == 'CLOSED':
+                        change_formatted = "Market Closed"
+                        change_color = "gray"
+                    else:
+                        # Estimate basis points change
+                        if '2Y' in display_name:
+                            multiplier = -40
+                        elif '10Y' in display_name:
+                            multiplier = -17
+                        else:
+                            multiplier = -20
+                        change_bps = change_percent * multiplier
+                        change_formatted = f"{change_bps:+.0f} bps"
+                        # Color: green if negative bps (yields down = bond prices up), red if positive
+                        change_color = "green" if change_bps < 0 else "red"
+                    
+                    table_data.append({
+                        "Instrument": display_name,
+                        "Change in Yield": {
+                            "text": change_formatted,
+                            "color": change_color  # Add color metadata
+                        }
+                    })
+            else:
+                headers = ["Instrument", "Level", "Change"]
+                table_data = []
+                for item in section_data:
+                    display_name = item.get('display_name', item.get('symbol', 'N/A'))
+                    price = item.get('price', 0)
+                    change_percent = item.get('change_percent', 0)
+                    market_status = item.get('market_status', 'OPEN').upper()
+                    
+                    # Format price
+                    if 'USD' in item.get('symbol', '') or item.get('symbol', '').startswith('$'):
+                        price_formatted = f"${price:,.2f}"
+                    else:
+                        price_formatted = f"{price:,.2f}"
+                    
+                    # Format change with color
+                    if market_status == 'CLOSED':
+                        change_formatted = "Market Closed"
+                        change_color = "gray"
+                    else:
+                        change_formatted = f"{change_percent:+.2f}%"
+                        change_color = "green" if change_percent > 0 else "red"
+                    
+                    table_data.append({
+                        "Instrument": display_name,
+                        "Level": price_formatted,
+                        "Change": {
+                            "text": change_formatted,
+                            "color": change_color  # Add color metadata
+                        }
+                    })
+            
+            table = _create_sorted_data_table(headers, table_data)
+            if table:
+                section_block_group.append(table)
+            
+            section_blocks.append(section_block_group)
+        
+        # Create two-column layout for sections
+        if section_blocks:
+            column_layout = self._create_two_column_layout(section_blocks)
+            blocks.extend(column_layout)
+        
+        return blocks
+
+    def _build_top_movers_section(self, payload: BriefingPayload) -> List[Dict]:
+        """Builds the Top Gainers & Losers section with colored changes."""
+        blocks = []
+        
+        blocks.append({
+            "type": "heading_2",
+            "content": {"richText": _create_rich_text("Top Market Movers", bold=True)}
+        })
+        
+        mover_columns = []
+        
+        # Top Gainers
+        if payload.top_gainers:
+            gainers_blocks = [{
+                "type": "heading_3",
+                "content": {"richText": _create_rich_text("📈 Top 5 Gainers", bold=True)}
+            }]
+            
+            gainers_data = []
+            for item in payload.top_gainers:
+                change_pct = item.get('change_percent', 0)
+                gainers_data.append({
+                    "Symbol": item.get('symbol', 'N/A'),
+                    "Price": f"${item.get('price', 0):.2f}",
+                    "Change": {
+                        "text": f"{change_pct:+.2f}%",
+                        "color": "green" if change_pct > 0 else "red"
+                    }
+                })
+            
+            gainers_table = _create_sorted_data_table(["Symbol", "Price", "Change"], gainers_data)
+            if gainers_table:
+                gainers_blocks.append(gainers_table)
+            
+            mover_columns.append({"type": "column", "children": gainers_blocks})
+        
+        # Top Losers (same pattern)
+        if payload.top_losers:
+            losers_blocks = [{
+                "type": "heading_3",
+                "content": {"richText": _create_rich_text("📉 Top 5 Losers", bold=True)}
+            }]
+            
+            losers_data = []
+            for item in payload.top_losers:
+                change_pct = item.get('change_percent', 0)
+                losers_data.append({
+                    "Symbol": item.get('symbol', 'N/A'),
+                    "Price": f"${item.get('price', 0):.2f}",
+                    "Change": {
+                        "text": f"{change_pct:+.2f}%",
+                        "color": "green" if change_pct > 0 else "red"
+                    }
+                })
+            
+            losers_table = _create_sorted_data_table(["Symbol", "Price", "Change"], losers_data)
+            if losers_table:
+                losers_blocks.append(losers_table)
+            
+            mover_columns.append({"type": "column", "children": losers_blocks})
+        
+        # Add empty column if only one type exists
+        if len(mover_columns) == 1:
+            mover_columns.append({"type": "column", "children": []})
+        
+        if mover_columns:
+            blocks.append({"type": "column_list", "children": mover_columns})
+        
+        return blocks
+
+    def _build_key_drivers(self, payload: BriefingPayload) -> List[Dict]:
+        """Builds the Key Market Drivers section."""
+        blocks = []
+        
+        if not payload.market_analysis or not payload.market_analysis.key_drivers:
+            return blocks
+        
+        blocks.append({
+            "type": "heading_2",
+            "content": {"richText": _create_rich_text("Key Market Drivers", bold=True)}
+        })
+        
+        for driver in payload.market_analysis.key_drivers:
+            blocks.append({
+                "type": "bulleted_list_item",
+                "content": {"richText": _create_rich_text(driver)}
+            })
+        
+        return blocks
+
+    def _build_calendar_section(self, payload: BriefingPayload) -> List[Dict]:
+        """Builds the Earnings & IPO Calendar section."""
+        blocks = []
+        
+        if not payload.earnings_calendar and not payload.ipo_calendar:
+            return blocks
+        
+        blocks.append({
+            "type": "heading_2",
+            "content": {"richText": _create_rich_text("📅 Economic Calendar", bold=True)}
+        })
+        
+        calendar_columns = []
+        
+        # Earnings Calendar
+        if payload.earnings_calendar:
+            earnings_blocks = [{
+                "type": "heading_3",
+                "content": {"richText": _create_rich_text("📊 Earnings Calendar", bold=True)}
+            }]
+            
+            earnings_data = []
+            for event in payload.earnings_calendar[:10]:  # First 10 events
+                symbol = event.get('symbol', 'N/A')
+                date = event.get('date', 'TBD')
+                estimate = event.get('estimate')
+                
+                # Format date
+                try:
+                    formatted_date = datetime.fromisoformat(date.replace('T00:00:00', '')).strftime('%b %d')
+                except (ValueError, TypeError):
+                    formatted_date = date
+                
+                earnings_data.append({
+                    "Symbol": symbol,
+                    "EPS Est": f"{estimate:.4f}" if isinstance(estimate, (int, float)) else "N/A",
+                    "Date": formatted_date
+                })
+            
+            earnings_table = _create_sorted_data_table(["Symbol", "EPS Est", "Date"], earnings_data)
+            if earnings_table:
+                earnings_blocks.append(earnings_table)
+            
+            # Add remaining events in toggle if more than 10
+            if len(payload.earnings_calendar) > 10:
+                remaining = payload.earnings_calendar[10:]
+                toggle_children = []
+                for event in remaining:
+                    symbol = event.get('symbol', 'N/A')
+                    date = event.get('date', 'TBD')
+                    estimate = event.get('estimate')
+                    
+                    try:
+                        formatted_date = datetime.fromisoformat(date.replace('T00:00:00', '')).strftime('%b %d, %Y')
+                    except (ValueError, TypeError):
+                        formatted_date = date
+                    
+                    details = f"EPS Est: {estimate:.4f}" if isinstance(estimate, (int, float)) else "EPS Est: N/A"
+                    
+                    toggle_children.append({
+                        "type": "bulleted_list_item",
+                        "content": {"richText": _create_rich_text(f"{symbol}: {details} ({formatted_date})")}
+                    })
+                
+                if toggle_children:
+                    earnings_blocks.append({
+                        "type": "toggle",
+                        "content": {"richText": _create_rich_text(f"Show {len(remaining)} More Events...")},
+                        "children": toggle_children
+                    })
+            
+            calendar_columns.append({"type": "column", "children": earnings_blocks})
+        
+        # IPO Calendar
+        if payload.ipo_calendar:
+            ipo_blocks = [{
+                "type": "heading_3",
+                "content": {"richText": _create_rich_text("🗓️ IPO Calendar", bold=True)}
+            }]
+            
+            ipo_data = []
+            for event in payload.ipo_calendar[:10]:  # First 10 events
+                symbol = event.get('symbol', 'N/A')
+                date = event.get('date', 'TBD')
+                price_range = event.get('priceRange', 'TBD')
+                
+                # Format date
+                try:
+                    formatted_date = datetime.fromisoformat(date.replace('T00:00:00', '')).strftime('%b %d')
+                except (ValueError, TypeError):
+                    formatted_date = date
+                
+                ipo_data.append({
+                    "Symbol": symbol,
+                    "Price Range": price_range,
+                    "Date": formatted_date
+                })
+            
+            ipo_table = _create_sorted_data_table(["Symbol", "Price Range", "Date"], ipo_data)
+            if ipo_table:
+                ipo_blocks.append(ipo_table)
+            
+            # Add remaining events in toggle if more than 10
+            if len(payload.ipo_calendar) > 10:
+                remaining = payload.ipo_calendar[10:]
+                toggle_children = []
+                for event in remaining:
+                    symbol = event.get('symbol', 'N/A')
+                    date = event.get('date', 'TBD')
+                    price_range = event.get('priceRange', 'TBD')
+                    
+                    try:
+                        formatted_date = datetime.fromisoformat(date.replace('T00:00:00', '')).strftime('%b %d, %Y')
+                    except (ValueError, TypeError):
+                        formatted_date = date
+                    
+                    toggle_children.append({
+                        "type": "bulleted_list_item",
+                        "content": {"richText": _create_rich_text(f"{symbol}: {price_range} ({formatted_date})")}
+                    })
+                
+                if toggle_children:
+                    ipo_blocks.append({
+                        "type": "toggle",
+                        "content": {"richText": _create_rich_text(f"Show {len(remaining)} More Events...")},
+                        "children": toggle_children
+                    })
+            
+            calendar_columns.append({"type": "column", "children": ipo_blocks})
+        
+        # Add empty column if only one calendar exists
+        if len(calendar_columns) == 1:
+            calendar_columns.append({"type": "column", "children": []})
+        
+        if calendar_columns:
+            blocks.append({"type": "column_list", "children": calendar_columns})
+        
+        return blocks
+
+    def _build_calendar_widget(self) -> List[Dict]:
+        """Builds the Economic Calendar Widget placeholder."""
+        return [
+            {
+                "type": "heading_2",
+                "content": {"richText": _create_rich_text("🗓️ Economic Calendar", bold=True)}
+            },
+            {
+                "type": "callout",
+                "content": {
+                    "richText": _create_rich_text("ECONOMIC_CALENDAR_WIDGET"),
+                    "icon": {"emoji": "⚙️"}
+                }
+            }
+        ]
+
+    def _build_headlines_section(self, payload: BriefingPayload) -> List[Dict]:
+        """
+        Builds the headlines section.
+        Shows stock-specific news for pre-market/US close, general headlines for others.
+        """
+        blocks = []
+        
+        # Route based on whether we have stock-specific news
+        if payload.stock_specific_news:
+            blocks.extend(self._build_stock_specific_news(payload))
+        elif payload.top_headlines:
+            blocks.extend(self._build_general_headlines(payload))
+        else:
+            blocks.append({
+                "type": "heading_2",
+                "content": {"richText": _create_rich_text("Top Headlines", bold=True)}
+            })
+            blocks.append({
+                "type": "paragraph",
+                "content": {"richText": _create_rich_text("No headlines available.")}
+            })
+        
+        return blocks
+
+    def _build_stock_specific_news(self, payload: BriefingPayload) -> List[Dict]:
+        """Builds stock-specific news section for gainers/losers."""
+        blocks = []
+        
+        blocks.append({
+            "type": "heading_2",
+            "content": {"richText": _create_rich_text("Top Gainers & Losers News", bold=True)}
+        })
+        
+        # Get ordered symbols (gainers first, then losers)
+        ordered_symbols = []
+        market_sections = payload.config.get('market_data_sections', {})
+        
+        if 'top_gainers' in market_sections:
+            ordered_symbols.extend(market_sections['top_gainers'].get('symbols', []))
+        if 'top_losers' in market_sections:
+            ordered_symbols.extend(market_sections['top_losers'].get('symbols', []))
+        
+        for symbol in ordered_symbols:
+            articles = payload.stock_specific_news.get(symbol, [])
+            if not articles:
+                continue
+            
+            # Symbol heading
+            blocks.append({
+                "type": "heading_3",
+                "content": {"richText": _create_rich_text(f"📰 News for {symbol}", bold=True)}
+            })
+            
+            # First 2 articles shown directly
+            for article in articles[:2]:
+                headline_text = article.get('headline', '')
+                summary_text = article.get('summary', '')
+                article_url = article.get('url', '')
+                
+                if headline_text:
+                    blocks.append({
+                        "type": "heading_3",
+                        "content": {"richText": _create_rich_text(headline_text, href=article_url if article_url else None)}
+                    })
+                
+                if summary_text:
+                    blocks.append({
+                        "type": "paragraph",
+                        "content": {"richText": _create_rich_text(summary_text, color="gray")}
+                    })
+            
+            # Remaining articles in toggle
+            if len(articles) > 2:
+                toggle_children = []
+                for article in articles[2:]:
+                    headline_text = article.get('headline', '')
+                    summary_text = article.get('summary', '')
+                    article_url = article.get('url', '')
+                    
+                    if headline_text:
+                        toggle_children.append({
+                            "type": "heading_3",
+                            "content": {"richText": _create_rich_text(headline_text, href=article_url if article_url else None)}
+                        })
+                    
+                    if summary_text:
+                        toggle_children.append({
+                            "type": "paragraph",
+                            "content": {"richText": _create_rich_text(summary_text, color="gray")}
+                        })
+                
+                if toggle_children:
+                    blocks.append({
+                        "type": "toggle",
+                        "content": {"richText": _create_rich_text(f"Show {len(articles) - 2} more headlines...")},
+                        "children": toggle_children
+                    })
+            
+            # Divider between symbols
+            blocks.append({"type": "divider", "content": {}})
+        
+        return blocks
+
+    def _build_general_headlines(self, payload: BriefingPayload) -> List[Dict]:
+        """Builds general headlines section for morning/EU close briefings."""
+        blocks = []
+        
+        blocks.append({
+            "type": "heading_2",
+            "content": {"richText": _create_rich_text("Top Headlines", bold=True)}
+        })
+        
+        for headline in payload.top_headlines:
+            headline_text = headline.headline
+            url = headline.url or ""
+            summary = headline.summary or ""
+            score = headline.score or 0
+            commentary = getattr(headline, 'commentary', None)
+            
+            # Headline
+            blocks.append({
+                "type": "heading_3",
+                "content": {"richText": _create_rich_text(headline_text, href=url if url else None, bold=True)}
+            })
+            
+            # Commentary (if available)
+            if commentary:
+                blocks.append({
+                    "type": "quote",
+                    "content": {"richText": _create_rich_text(commentary, color="blue")}
+                })
+            
+            # Details in toggle
+            toggle_children = []
+            if summary:
+                toggle_children.append({
+                    "type": "paragraph",
+                    "content": {"richText": _create_rich_text(f"Summary: {summary}")}
+                })
+            if url:
+                toggle_children.append({
+                    "type": "paragraph",
+                    "content": {"richText": _create_rich_text("Source Link", href=url)}
+                })
+            if score:
+                toggle_children.append({
+                    "type": "paragraph",
+                    "content": {"richText": _create_rich_text(f"Impact Score: {score}/10")}
+                })
+            
+            if toggle_children:
+                blocks.append({
+                    "type": "toggle",
+                    "content": {"richText": _create_rich_text("Details & Source")},
+                    "children": toggle_children
+                })
+            
+            blocks.append({"type": "divider", "content": {}})
+        
+        return blocks
+
+    def _build_detailed_analysis(self, payload: BriefingPayload) -> List[Dict]:
+        """Builds the Detailed Section Analysis section."""
+        blocks = []
+        
+        if not payload.market_analysis or not payload.market_analysis.section_analyses:
+            return blocks
+        
+        blocks.append({
+            "type": "heading_2",
+            "content": {"richText": _create_rich_text("Detailed Section Analysis", bold=True)}
+        })
+        
+        for section in payload.market_analysis.section_analyses:
+            section_title = section.section_name.replace('_', ' ').title()
+            toggle_header = f"{section_title}: {section.section_sentiment} ({section.avg_performance:+.2f}%)"
+            
+            toggle_children = []
+            for mover in section.key_movers:
+                toggle_children.append({
+                    "type": "bulleted_list_item",
+                    "content": {"richText": _create_rich_text(mover)}
+                })
+            
+            blocks.append({
+                "type": "toggle",
+                "content": {"richText": _create_rich_text(toggle_header)},
+                "children": toggle_children
+            })
+        
+        return blocks
+
+    def _build_disclaimer(self) -> List[Dict]:
+        """Builds the disclaimer/footer section."""
+        return [
+            {"type": "divider", "content": {}},
+            {
+                "type": "quote",
+                "content": {"richText": _create_rich_text(
+                    "Market data sourced from Binance, IG-Index, Mexc, and Finnhub. "
+                    "Economic calendar via TradingView, macro data via FRED.",
+                    italic=True
+                )}
+            }
+        ]
+
+    def _create_two_column_layout(self, content_groups: List[List[Dict]]) -> List[Dict]:
+        """
+        Creates a two-column layout from a list of content block groups.
+        Handles odd numbers by adding an empty second column.
+        """
+        layout_blocks = []
+        
+        for i in range(0, len(content_groups), 2):
+            pair = content_groups[i:i+2]
+            
+            column_list_children = []
+            for group in pair:
+                column_list_children.append({
+                    "type": "column",
+                    "children": group
+                })
+            
+            # Add empty column if odd number
+            if len(pair) == 1:
+                column_list_children.append({
+                    "type": "column",
+                    "children": []
+                })
+            
+            layout_blocks.append({
+                "type": "column_list",
+                "children": column_list_children
+            })
+        
+        return layout_blocks
