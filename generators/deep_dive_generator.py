@@ -4,6 +4,8 @@ import re
 from typing import Optional, List
 from datetime import datetime
 from services.enrichment_service import MarketDataEnrichmentService
+from services.semantic_theme_service import SemanticThemeService
+from services.content_similarity_service import ContentSimilarityService
 
 # Import services and models from the new architecture
 from core.models import (
@@ -23,6 +25,11 @@ class DeepDiveGenerator:
         self.market_client = market_client
         self.config = config
         self.enrichment_service = MarketDataEnrichmentService(self.market_client)
+        self.semantic_theme_service = SemanticThemeService(self.data_service)
+        self.content_similarity_service = ContentSimilarityService(
+            self.data_service,
+            self.semantic_theme_service
+        )
         
         # Category rotation tracking (same as CommentaryGenerator)
         self.last_used_category = None
@@ -44,59 +51,82 @@ class DeepDiveGenerator:
         }
 
     async def generate(self, request: Optional[ContentRequest] = None) -> GeneratedContent:
-        """
-        Orchestrates the generation of a deep dive thread.
-
-        This method follows the same flow as CommentaryGenerator:
-        1. Get a high-scoring headline.
-        2. Determine category and theme.
-        3. Generate thread content using GPT.
-        4. Enrich with market data.
-        5. Return a structured GeneratedContent object.
-        """
+        """Generate deep dive thread with semantic similarity checking"""
         try:
-            logger.info("📊 Generating hedge fund deep dive thread")
+            logger.info("📊 Generating hedge fund deep dive thread with semantic intelligence")
 
-            # 1. Get a high-scoring headline for the deep dive (FIXED: use new method)
+            # 1. Get a high-scoring headline for the deep dive
             headline = self._get_headline_for_content(request)
             if not headline:
                 raise Exception("No suitable high-scoring headline available for deep dive")
 
-            # 2. Determine category and theme for deduplication
+            # 2. Determine category
             category = self._determine_category(request, headline)
-            theme = self._extract_and_validate_theme(headline.headline)
 
-            # 3. Build the prompt and generate the thread using GPTService
+            # === NEW: SEMANTIC SIMILARITY CHECK ===
+            # 3. Extract semantic theme from headline
+            semantic_theme = self.semantic_theme_service.extract_theme(headline.headline)
+            logger.info(f"🧠 Semantic theme extracted: {semantic_theme[:50]}...")
+            
+            # 4. Check if content is too similar to recent deep dives
+            is_too_similar, similar_content = self.content_similarity_service.is_content_too_similar(
+                text=headline.headline,
+                hours_back=24,  # Longer window for deep dives
+                similarity_threshold=0.50,
+                content_type="deep_dive"  # Only compare to other deep dives
+            )
+            
+            if is_too_similar:
+                logger.warning(f"🚫 Headline too similar to recent deep dive (>{similar_content['similarity']:.0%})")
+                logger.warning(f"   Similar to: {similar_content['content'][:80]}...")
+                raise Exception(
+                    f"Deep dive rejected: {similar_content['similarity']:.0%} similar to recent thread. "
+                    "Try again with different headline."
+                )
+            
+            logger.info("✅ Semantic similarity check passed - deep dive topic is unique")
+            # === END SEMANTIC CHECK ===
+
+            # 5. Build the prompt and generate the thread using GPTService
             prompt = self._build_deep_dive_prompt(headline, category)
-            # Use the existing gpt_service method to generate a thread
             thread_parts = self.gpt_service.generate_thread(prompt, max_parts=3)
 
             if not thread_parts:
                 raise Exception("GPT thread generation failed or returned no parts")
 
-            # 4. Enrich all thread parts with market data
+            # 6. Enrich all thread parts with market data
             enriched_parts, market_data = await self.enrichment_service.enrich_content(thread_parts)
 
-            # 5. Add mentions and disclaimer to the last part only
+            # 7. Add mentions and disclaimer to the last part only
             enriched_parts = self._finalize_thread_parts(enriched_parts)
 
-            # 6. Combine parts into a single string for the main text field
+            # 8. Combine parts into a single string for the main text field
             final_text = "\n\n---\n\n".join(enriched_parts)
 
-            # 7. Mark headline as used and track the theme
+            # === NEW: SEMANTIC THEME TRACKING ===
+            # 9. Mark headline as used
             self.data_service.mark_headline_used(headline.id, "deep_dive")
-            self.data_service.track_theme(theme)
+            
+            # 10. Track semantic theme with full thread content
+            self.semantic_theme_service.track_theme(
+                theme_text=semantic_theme,
+                full_content=final_text,
+                content_type="deep_dive",
+                category=category.value
+            )
+            logger.info(f"✅ Semantic theme tracked for deep dive thread")
+            # === END SEMANTIC TRACKING ===
 
-            logger.info(f"✅ Generated deep dive thread on '{theme}' ({len(enriched_parts)} parts)")
+            logger.info(f"✅ Generated deep dive thread on '{semantic_theme[:30]}...' ({len(enriched_parts)} parts)")
 
             return GeneratedContent(
                 text=final_text,
                 content_type=ContentType.DEEP_DIVE,
                 category=category,
-                theme=theme,
+                theme=semantic_theme,  # Use semantic theme
                 market_data=market_data,
                 headline_used=headline,
-                parts=enriched_parts  # Store individual parts for thread posting
+                parts=enriched_parts
             )
 
         except Exception as e:
@@ -208,32 +238,3 @@ class DeepDiveGenerator:
             return max(category_scores, key=category_scores.get)
         else:
             return ContentCategory.MACRO
-
-    def _extract_and_validate_theme(self, headline: str) -> str:
-        """Extract and validate theme for deduplication (same as CommentaryGenerator)"""
-        # Extract meaningful words (remove stopwords)
-        stopwords = {"the", "in", "of", "and", "to", "a", "after", "on", "for", "with", "is", "are", "will", "has", "have"}
-        words = headline.split()
-        
-        theme_candidates = []
-        for word in words:
-            word_clean = re.sub(r'[^\w]', '', word.lower())
-            if len(word_clean) > 3 and word_clean not in stopwords:
-                theme_candidates.append(word_clean)
-        
-        # Create theme from first significant word or fallback
-        if theme_candidates:
-            base_theme = theme_candidates[0]
-        else:
-            base_theme = "market_update"
-        
-        # Check for duplicates and modify if needed
-        theme = base_theme
-        is_duplicate = self.data_service.is_duplicate_theme(theme)
-        
-        if is_duplicate:
-            # Add timestamp to make unique
-            theme = f"{base_theme}_{datetime.now().strftime('%H%M')}"
-            logger.info(f"🔄 Theme modified to avoid duplicate: {theme}")
-        
-        return theme

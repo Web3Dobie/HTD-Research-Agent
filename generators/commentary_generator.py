@@ -8,6 +8,8 @@ from typing import Optional, List, Dict, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
 from services.enrichment_service import MarketDataEnrichmentService
+from services.semantic_theme_service import SemanticThemeService
+from services.content_similarity_service import ContentSimilarityService
 
 # Notion client for memory
 try:
@@ -38,6 +40,11 @@ class CommentaryGenerator:
         self.market_client = market_client
         self.config = config
         self.enrichment_service = MarketDataEnrichmentService(self.market_client)
+        self.semantic_theme_service = SemanticThemeService(self.data_service)
+        self.content_similarity_service = ContentSimilarityService(
+            self.data_service, 
+            self.semantic_theme_service
+        )
         
         # Initialize Notion memory if available
         self.notion_client = None
@@ -87,14 +94,13 @@ class CommentaryGenerator:
         self.keyword_repeat_limit = 2  # Max keyword repeats
     
     async def generate(self, request: Optional[ContentRequest] = None) -> GeneratedContent:
-        """Generate commentary content with intelligent diversity control"""
+        """Generate commentary content with semantic similarity checking"""
         try:
-            logger.info("🐂 Generating hedge fund commentary with diversity control")
+            logger.info("🐂 Generating hedge fund commentary with semantic intelligence")
             
-            # 1. Analyze recent content diversity
+            # 1. Analyze recent content diversity (existing Notion-based logic)
             diversity_analysis = self._analyze_recent_content()
             logger.info(f"📊 Recent categories: {diversity_analysis['categories']}")
-            logger.info(f"🎯 Category concentration: {diversity_analysis['concentration']:.2f}")
             
             # 2. Get headline for content generation
             headline = self._get_headline_for_content(request)
@@ -105,39 +111,62 @@ class CommentaryGenerator:
             category = self._determine_category_smart(request, headline, diversity_analysis)
             logger.info(f"📂 Selected category: {category.value}")
             
-            # 4. Extract theme for deduplication
-            theme = self._extract_and_validate_theme(headline.headline)
+            # === NEW: SEMANTIC SIMILARITY CHECK ===
+            # 4. Extract semantic theme from headline
+            semantic_theme = self.semantic_theme_service.extract_theme(headline.headline)
+            logger.info(f"🧠 Semantic theme extracted: {semantic_theme[:50]}...")
             
-            # 5. Generate base commentary using GPT
+            # 5. Check if content is too similar to recent posts
+            is_too_similar, similar_content = self.content_similarity_service.is_content_too_similar(
+                text=headline.headline,
+                hours_back=8,
+                similarity_threshold=0.50
+            )
+            
+            if is_too_similar:
+                logger.warning(f"🚫 Headline too similar to recent content (>{similar_content['similarity']:.0%})")
+                logger.warning(f"   Similar to: {similar_content['content'][:80]}...")
+                raise Exception(
+                    f"Content rejected: {similar_content['similarity']:.0%} similar to recent post. "
+                    "Try again with different headline."
+                )
+            
+            logger.info("✅ Semantic similarity check passed - content is unique")
+            # === END SEMANTIC CHECK ===
+            
+            # 6. Generate base commentary using GPT
             prompt = self._build_commentary_prompt(headline, category)
             base_text = self.gpt_service.generate_tweet(prompt)
             
             if not base_text:
                 raise Exception("GPT generation failed")
             
-            # 6. Check for keyword diversity and regenerate if needed
+            # 7. Check for keyword diversity and regenerate if needed
             base_text = self._ensure_keyword_diversity(base_text, prompt, diversity_analysis)
             
-            # 7. Enrich with market data if requested
+            # 8. Enrich with market data if requested
             enriched_text = base_text
             market_data = []
             
             if request and request.include_market_data:
                 enriched_text, market_data = await self.enrichment_service.enrich_content(base_text)
             
-            # 8. Add mentions and disclaimer
+            # 9. Add mentions and disclaimer
             final_text = self._finalize_text(enriched_text)
             
-            # 9. Mark headline as used and track theme
+            # === NEW: SEMANTIC THEME TRACKING ===
+            # 10. Mark headline as used
             self.data_service.mark_headline_used(headline.id, "commentary")
             
-            # 10. Log decision for debugging
-            avoided_categories = [cat.value for cat in ContentCategory if cat != category 
-                                and diversity_analysis['categories'].get(cat.value, 0) > 
-                                diversity_analysis['total_posts'] * 0.4]
-            
-            if avoided_categories:
-                logger.info(f"🚫 Avoided overused categories: {avoided_categories}")
+            # 11. Track semantic theme (replaces old track_theme)
+            self.semantic_theme_service.track_theme(
+                theme_text=semantic_theme,
+                full_content=final_text,
+                content_type="commentary",
+                category=category.value
+            )
+            logger.info(f"✅ Semantic theme tracked with embedding")
+            # === END SEMANTIC TRACKING ===
             
             logger.info(f"✅ Generated diverse commentary: {final_text[:50]}...")
             
@@ -145,7 +174,7 @@ class CommentaryGenerator:
                 text=final_text,
                 content_type=ContentType.COMMENTARY,
                 category=category,
-                theme=theme,
+                theme=semantic_theme,  # Use semantic theme
                 market_data=market_data,
                 headline_used=headline
             )
@@ -401,36 +430,7 @@ class CommentaryGenerator:
         headline_lower = headline.lower()
         keywords = self.category_keywords.get(category, [])
         return any(keyword in headline_lower for keyword in keywords)
-    
-    def _extract_and_validate_theme(self, headline: str) -> str:
-        """Extract theme and check for duplicates"""
-        # Simple theme extraction - first few words or key topic
-        words = headline.split()
-        
-        # Look for key financial terms
-        theme_candidates = []
-        for word in words[:8]:  # Check first 8 words
-            word_clean = re.sub(r'[^\w]', '', word.lower())
-            if len(word_clean) > 3 and word_clean in headline.lower():
-                theme_candidates.append(word_clean)
-        
-        # Create theme from first significant word or fallback
-        if theme_candidates:
-            base_theme = theme_candidates[0]
-        else:
-            base_theme = "market_update"
-        
-        # Check for duplicates and modify if needed
-        theme = base_theme
-        is_duplicate = self.data_service.is_duplicate_theme(theme)
-        
-        if is_duplicate:
-            # Add timestamp or modifier to make unique
-            theme = f"{base_theme}_{datetime.now().strftime('%H%M')}"
-            logger.info(f"🔄 Theme modified to avoid duplicate: {theme}")
-        
-        return theme
-    
+      
     def _build_commentary_prompt(self, headline: Headline, category: ContentCategory) -> str:
         """Build GPT prompt for commentary generation"""
         
