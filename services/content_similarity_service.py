@@ -4,6 +4,7 @@ Prevents posting content that's too similar to recent posts
 """
 
 import logging
+import json
 from typing import Optional, Dict, Tuple
 from datetime import datetime, timedelta
 
@@ -96,7 +97,7 @@ class ContentSimilarityService:
         """
         # Generate embedding
         embedding = self.semantic_service.get_embedding(content_text)
-        embedding_list = embedding.tolist()
+        embedding_json = json.dumps(embedding.tolist())
         
         try:
             with self.db.get_connection() as conn:
@@ -104,9 +105,9 @@ class ContentSimilarityService:
                     cur.execute("""
                         INSERT INTO hedgefund_agent.content_history
                         (content_text, content_type, theme_id, embedding_vector, created_at)
-                        VALUES (%s, %s, %s, %s, NOW())
+                        VALUES (%s, %s, %s, %s::jsonb, NOW())
                         RETURNING id
-                    """, (content_text, content_type, theme_id, embedding_list))
+                    """, (content_text, content_type, theme_id, embedding_json))
                     
                     content_id = cur.fetchone()[0]
                     conn.commit()

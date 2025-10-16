@@ -7,6 +7,7 @@ import logging
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime, timedelta
 import numpy as np
+import json
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -137,7 +138,7 @@ class SemanticThemeService:
         embedding = self.get_embedding(full_content)
         
         # Convert numpy array to list for JSON storage
-        embedding_list = embedding.tolist()
+        embedding_json = json.dumps(embedding.tolist())
         
         # Store in database
         try:
@@ -147,13 +148,13 @@ class SemanticThemeService:
                     cur.execute("""
                         INSERT INTO hedgefund_agent.semantic_themes 
                         (theme_text, content_type, category, embedding_vector, usage_count, last_used_at)
-                        VALUES (%s, %s, %s, %s, 1, NOW())
+                        VALUES (%s, %s, %s, %s::jsonb, 1, NOW())
                         ON CONFLICT (theme_text) 
                         DO UPDATE SET
                             usage_count = hedgefund_agent.semantic_themes.usage_count + 1,
                             last_used_at = NOW()
                         RETURNING id
-                    """, (theme_text, content_type, category, embedding_list))
+                    """, (theme_text, content_type, category, embedding_json))
                     
                     theme_id = cur.fetchone()[0]
                     conn.commit()
