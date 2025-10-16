@@ -5,6 +5,7 @@ Caches username to avoid repeated get_me() calls.
 """
 
 import logging
+import os
 from typing import Optional, List
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -47,6 +48,10 @@ class PublishingService:
         # Initialize Twitter client
         self.client = None
         self._initialize_client()
+        self.api = tweepy.API(tweepy.OAuth1UserHandler(
+            self.consumer_key, self.consumer_secret,
+            self.access_token, self.access_token_secret
+        ))
         
     def _initialize_client(self):
         """Initialize Twitter client with error handling - NO user verification to avoid rate limits"""
@@ -260,6 +265,113 @@ class PublishingService:
                 "note": "Service may still work for posting"
             }
 
+    def upload_media(self, image_path: str) -> Optional[str]:
+        """
+        Upload media to Twitter and return media_id.
+        
+        Args:
+            image_path: Path to the image file
+            
+        Returns:
+            media_id string if successful, None if failed
+        """
+        try:
+            if not os.path.exists(image_path):
+                self.logger.error(f"Image file not found: {image_path}")
+                return None
+            
+            # Check file size (Twitter limit is 5MB for images)
+            file_size = os.path.getsize(image_path)
+            if file_size > 5 * 1024 * 1024:  # 5MB
+                self.logger.error(f"Image file too large: {file_size} bytes")
+                return None
+            
+            # Upload media using Twitter API v2
+            with open(image_path, 'rb') as image_file:
+                response = self.api.media_upload(filename=image_path, file=image_file)
+                
+            if hasattr(response, 'media_id'):
+                self.logger.info(f"Successfully uploaded media: {response.media_id}")
+                return str(response.media_id)
+            else:
+                self.logger.error("Media upload response missing media_id")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Failed to upload media: {e}")
+            return None
+    
+    def publish_tweet_with_media(self, content: GeneratedContent, image_path: str = None) -> 'TwitterResult':
+        """
+        Publish tweet with optional media attachment.
+        
+        Args:
+            content: GeneratedContent object with tweet text
+            image_path: Optional path to image file
+            
+        Returns:
+            TwitterResult with success/failure details
+        """
+        try:
+            media_ids = []
+            
+            # Upload media if provided
+            if image_path:
+                media_id = self.upload_media(image_path)
+                if media_id:
+                    media_ids.append(media_id)
+                else:
+                    self.logger.warning("Failed to upload media, posting text-only tweet")
+            
+            # Prepare tweet parameters
+            tweet_params = {
+                'text': content.text
+            }
+            
+            if media_ids:
+                tweet_params['media'] = {'media_ids': media_ids}
+            
+            # Publish tweet
+            response = self.client.create_tweet(**tweet_params)
+            
+            if response and response.data:
+                tweet_id = response.data['id']
+                tweet_url = f"https://twitter.com/user/status/{tweet_id}"
+                
+                result = TwitterResult(
+                    success=True,
+                    tweet_id=tweet_id,
+                    url=tweet_url,
+                    timestamp=datetime.now(timezone.utc),
+                    error=None
+                )
+                
+                self.logger.info(f"✅ Tweet published successfully: {tweet_url}")
+                if media_ids:
+                    self.logger.info(f"📊 Tweet includes media: {len(media_ids)} attachment(s)")
+                
+                return result
+            else:
+                error_msg = "Twitter API returned empty response"
+                self.logger.error(f"❌ {error_msg}")
+                return TwitterResult(
+                    success=False,
+                    tweet_id=None,
+                    url=None,
+                    timestamp=datetime.now(timezone.utc),
+                    error=error_msg
+                )
+                
+        except Exception as e:
+            error_msg = f"Failed to publish tweet with media: {e}"
+            self.logger.error(f"❌ {error_msg}")
+            return TwitterResult(
+                success=False,
+                tweet_id=None,
+                url=None,
+                timestamp=datetime.now(timezone.utc),
+                error=error_msg
+            )
 
 # Convenience function for easy testing
 def quick_tweet(text: str) -> TwitterResult:

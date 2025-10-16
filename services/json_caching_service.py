@@ -8,6 +8,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from core.models import BriefingPayload, Headline
+from services.market_sentiment_service import SectionAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,8 @@ class JSONCachingService:
         # ============================================================
         # FINAL JSON ASSEMBLY
         # ============================================================
+        enhanced_summary = self._build_enhanced_briefing_summary(payload)
+
         final_json = {
             "id": notion_page_id,
             "title": payload.config.get('briefing_title', 'Market Briefing'),
@@ -163,7 +166,8 @@ class JSONCachingService:
             "pageUrl": final_website_url,
             "tweetUrl": tweet_url,
             "marketSentiment": payload.market_analysis.sentiment.value if payload.market_analysis else "NEUTRAL",
-            "content": [block for block in content_blocks if block]  # Filter out None blocks
+            "content": [block for block in content_blocks if block],  # Filter out None blocks
+            "enhancedSummary": enhanced_summary  # Add enhanced data for LatestBriefingCard
         }
         
         self.logger.info(f"✅ Generated JSON with {len(content_blocks)} content blocks")
@@ -800,3 +804,165 @@ class JSONCachingService:
             })
         
         return layout_blocks
+
+    def _build_enhanced_briefing_summary(self, payload: BriefingPayload) -> Dict:
+        """Build enhanced summary data for LatestBriefingCard component."""
+        
+        analysis = payload.market_analysis
+        if not analysis:
+            return {}
+        
+        # Calculate market momentum indicators
+        momentum_data = self._calculate_momentum_indicators(analysis.section_analyses)
+        
+        # Get top sector movers
+        sector_movers = self._get_sector_highlights(analysis.section_analyses)
+        
+        # Create visual sentiment data
+        sentiment_visual = {
+            'sentiment': analysis.sentiment.value,
+            'confidence': analysis.confidence_score,
+            'emoji': self._get_sentiment_emoji(analysis.sentiment.value),
+            'color': self._get_sentiment_color(analysis.sentiment.value),
+            'description': self._get_sentiment_description(analysis.sentiment.value)
+        }
+        
+        return {
+            'sentiment_visual': sentiment_visual,
+            'momentum_indicators': momentum_data,
+            'sector_highlights': sector_movers,
+            'key_insights': analysis.key_drivers[:3],
+            'market_summary_short': analysis.market_summary[:150] + "..." if len(analysis.market_summary) > 150 else analysis.market_summary,
+            'confidence_level': self._map_confidence_to_level(analysis.confidence_score),
+            'market_health_score': self._calculate_market_health_score(analysis.section_analyses)
+        }
+
+    def _calculate_momentum_indicators(self, section_analyses: List[SectionAnalysis]) -> Dict:
+        """Calculate momentum indicators for visual display."""
+        
+        if not section_analyses:
+            return {}
+        
+        bullish_count = sum(1 for s in section_analyses if s.section_sentiment == "BULLISH")
+        bearish_count = sum(1 for s in section_analyses if s.section_sentiment == "BEARISH")
+        total_sections = len(section_analyses)
+        
+        return {
+            'bullish_percentage': (bullish_count / total_sections) * 100,
+            'bearish_percentage': (bearish_count / total_sections) * 100,
+            'neutral_percentage': ((total_sections - bullish_count - bearish_count) / total_sections) * 100,
+            'momentum_direction': 'bullish' if bullish_count > bearish_count else 'bearish' if bearish_count > bullish_count else 'neutral'
+        }
+
+    def _get_sector_highlights(self, section_analyses: List[SectionAnalysis]) -> List[Dict]:
+        """Get top performing and underperforming sectors."""
+        
+        if not section_analyses:
+            return []
+        
+        # Sort by performance
+        sorted_sections = sorted(section_analyses, key=lambda x: x.avg_performance, reverse=True)
+        
+        highlights = []
+        
+        # Top performer
+        if len(sorted_sections) > 0:
+            top = sorted_sections[0]
+            highlights.append({
+                'type': 'top_performer',
+                'name': top.section_name.replace('_', ' ').title(),
+                'performance': top.avg_performance,
+                'emoji': self._get_sector_emoji(top.section_name)
+            })
+        
+        # Bottom performer  
+        if len(sorted_sections) > 1:
+            bottom = sorted_sections[-1]
+            highlights.append({
+                'type': 'underperformer',
+                'name': bottom.section_name.replace('_', ' ').title(), 
+                'performance': bottom.avg_performance,
+                'emoji': self._get_sector_emoji(bottom.section_name)
+            })
+        
+        return highlights
+
+    def _get_sentiment_emoji(self, sentiment: str) -> str:
+        """Get emoji for sentiment."""
+        emoji_map = {
+            'BULLISH': '🐂',
+            'BEARISH': '🐻', 
+            'MIXED': '⚖️',
+            'NEUTRAL': '😐'
+        }
+        return emoji_map.get(sentiment, '📊')
+
+    def _get_sentiment_color(self, sentiment: str) -> str:
+        """Get color code for sentiment."""
+        color_map = {
+            'BULLISH': '#22c55e',  # Green
+            'BEARISH': '#ef4444',  # Red
+            'MIXED': '#f59e0b',    # Orange
+            'NEUTRAL': '#6b7280'   # Gray
+        }
+        return color_map.get(sentiment, '#6b7280')
+
+    def _get_sector_emoji(self, sector_name: str) -> str:
+        """Get emoji for sector."""
+        emoji_map = {
+            'us_futures': '🇺🇸',
+            'european_futures': '🇪🇺', 
+            'asian_focus': '🌏',
+            'crypto': '🪙',
+            'fx': '💱',
+            'rates': '💵',
+            'volatility': '📉',
+            'commodities': '🏗️'
+        }
+        return emoji_map.get(sector_name, '📊')
+
+    def _get_sentiment_description(self, sentiment: str) -> str:
+        """Get description for sentiment."""
+        description_map = {
+            'BULLISH': 'Markets showing strong upward momentum',
+            'BEARISH': 'Markets under pressure with downward bias',
+            'MIXED': 'Markets showing conflicting signals across sectors',
+            'NEUTRAL': 'Markets in consolidation with limited direction'
+        }
+        return description_map.get(sentiment, 'Market direction unclear')
+
+    def _map_confidence_to_level(self, confidence_score: float) -> str:
+        """Map confidence score to human readable level."""
+        if confidence_score >= 0.8:
+            return 'Very High'
+        elif confidence_score >= 0.6:
+            return 'High'
+        elif confidence_score >= 0.4:
+            return 'Moderate'
+        elif confidence_score >= 0.2:
+            return 'Low'
+        else:
+            return 'Very Low'
+
+    def _calculate_market_health_score(self, section_analyses) -> float:
+        """Calculate overall market health score (0-100)."""
+        if not section_analyses:
+            return 50.0
+        
+        # Base score on percentage of bullish vs bearish sections
+        bullish_count = sum(1 for s in section_analyses if s.section_sentiment == "BULLISH")
+        bearish_count = sum(1 for s in section_analyses if s.section_sentiment == "BEARISH")
+        total_sections = len(section_analyses)
+        
+        # Calculate score: 50 is neutral, higher is healthier
+        if total_sections == 0:
+            return 50.0
+        
+        bullish_ratio = bullish_count / total_sections
+        bearish_ratio = bearish_count / total_sections
+        
+        # Health score: bullish sections add points, bearish subtract
+        health_score = 50 + (bullish_ratio * 50) - (bearish_ratio * 50)
+        
+        # Clamp between 0 and 100
+        return max(0.0, min(100.0, health_score))

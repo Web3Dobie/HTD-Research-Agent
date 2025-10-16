@@ -7,7 +7,7 @@ Integrates headline processing, GPT generation, market data, and multi-platform 
 import logging
 import asyncio
 import aiohttp
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone
 
 from core.models import GeneratedContent, ContentRequest, ContentType, ContentCategory, BriefingPayload
@@ -26,6 +26,7 @@ from services.briefing_config_service import ConfigService
 from services.market_sentiment_service import ComprehensiveMarketSentimentService
 from services.prompt_augmentation_service import PromptAugmentationService
 from services.json_caching_service import JSONCachingService
+from services.chart_generation_service import ChartGenerationService
 
 class ContentEngine:
     """
@@ -41,6 +42,7 @@ class ContentEngine:
         self.gpt_service = GPTService()
         self.market_client = MarketClient()
         self.prompt_augmentation_service = PromptAugmentationService()
+        self.chart_service = ChartGenerationService()
 
         # Publishing services
         self.publishing_service = PublishingService()
@@ -251,26 +253,59 @@ class ContentEngine:
             self.logger.error(f"❌ Content generation failed: {e}")
             return None
 
-    async def run_briefing_pipeline(self, briefing_key: str = 'morning_briefing', publish_tweet: bool = True): # <-- Add the parameter here
+    async def _generate_chart_for_tweet(self, payload: BriefingPayload) -> Optional[str]:
+        """Generate chart for tweet if conditions are met."""
+        try:
+            if not payload.market_analysis or not payload.market_analysis.section_analyses:
+                return None
+            
+            # Only generate charts for certain briefing types or conditions
+            briefing_type = payload.config.get('briefing_title', '')
+            
+            # Generate chart for morning briefings or when volatility is high
+            should_generate_chart = (
+                'Morning' in briefing_type or 
+                self._assess_volatility_level(payload.market_analysis.section_analyses) in ['high', 'elevated']
+            )
+            
+            if not should_generate_chart:
+                return None
+            
+            # Choose chart type based on data
+            if len(payload.market_analysis.section_analyses) >= 4:
+                chart_path = self.chart_service.generate_sentiment_chart(payload.market_analysis)
+            else:
+                chart_path = self.chart_service.generate_performance_summary_chart(payload.market_analysis.section_analyses)
+            
+            return chart_path
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate chart for tweet: {e}")
+            return None
+
+    async def run_briefing_pipeline(self, briefing_key: str = 'morning_briefing', publish_tweet: bool = True, include_charts: bool = True):
         """
         Executes the complete, end-to-end pipeline for generating and publishing a briefing.
+        Added include_charts parameter for chart generation control.
         """
-        self.logger.info(f"--- 🚀 Starting {briefing_key} pipeline (Publish Tweet: {publish_tweet}) ---")
+        self.logger.info(f"--- 🚀 Starting {briefing_key} pipeline (Publish Tweet: {publish_tweet}, Charts: {include_charts}) ---")
         if not self.briefing_generator:
             self.logger.error("BriefingGenerator not available. Aborting.")
             return
 
+        chart_path = None  # Track chart for cleanup
+        
         try:
             # Step 1: Generate the briefing content payload
             payload = await self.briefing_generator.create(briefing_key)
-            self.logger.info("Step 1/7: Briefing payload generated successfully.")
+            self.logger.info("Step 1/8: Briefing payload generated successfully.")
 
             # Step 2: Publish to Notion to get the internal page_id
             notion_result = await self.notion_publisher.publish_briefing(payload, briefing_key)
             if not notion_result or 'page_id' not in notion_result:
                 raise Exception("Failed to publish to Notion or get page_id.")
             notion_page_id = notion_result['page_id']
-            self.logger.info(f"Step 2/7: Published to Notion, page_id: {notion_page_id}")
+            self.logger.info(f"Step 2/8: Published to Notion, page_id: {notion_page_id}")
 
             # Step 3: Create a record in our database to get a clean, permanent ID
             briefing_id = self.database_service.create_briefing_record(
@@ -278,29 +313,51 @@ class ContentEngine:
                 notion_page_id=notion_page_id,
                 title=payload.config.get('briefing_title', 'Market Briefing')
             )
-            self.logger.info(f"Step 3/7: Created database record, briefing_id: {briefing_id}")
+            self.logger.info(f"Step 3/8: Created database record, briefing_id: {briefing_id}")
 
             # Step 4: Construct the final, public-facing URL
             final_website_url = f"https://www.dutchbrat.com/briefings?briefing_id={briefing_id}"
-            self.logger.info(f"Step 4/7: Constructed public URL: {final_website_url}")
-            tweet_url = ""  # Initialize tweet_url to an empty string
-            # Step 5, 6, 7: Conditionally publish tweet and update URLs
+            self.logger.info(f"Step 4/8: Constructed public URL: {final_website_url}")
+            
+            tweet_url = ""
+            
+            # Step 5-7: Enhanced tweet publishing with optional charts
             if publish_tweet:
-                self.logger.info("publish_tweet is True. Proceeding with tweet publication.")
+                self.logger.info("publish_tweet is True. Proceeding with enhanced tweet publication.")
                 
-                # Step 5: Generate the promotional tweet
-                tweet_text = await self._generate_briefing_promo_tweet(
-                    payload=payload,
-                    briefing_url=final_website_url
-                )
-                self.logger.info("Step 5/7: Generated promotional tweet text.")
+                # Step 5: Generate tweet text and optionally chart
+                if include_charts:
+                    tweet_text, chart_path = await self._generate_briefing_promo_tweet_with_chart(
+                        payload=payload,
+                        briefing_url=final_website_url
+                    )
+                    if chart_path:
+                        self.logger.info(f"Step 5/8: Generated tweet with chart: {chart_path}")
+                    else:
+                        self.logger.info("Step 5/8: Generated tweet text (no chart generated)")
+                else:
+                    tweet_text = await self._generate_briefing_promo_tweet(
+                        payload=payload,
+                        briefing_url=final_website_url
+                    )
+                    chart_path = None
+                    self.logger.info("Step 5/8: Generated tweet text (charts disabled)")
 
-                # Step 6: Publish the tweet
+                # Step 6: Publish the tweet (with or without media)
                 tweet_content = GeneratedContent(text=tweet_text, content_type=ContentType.BRIEFING, theme="Market Briefing")
-                tweet_result = self.publishing_service.publish_tweet(tweet_content)
+                
+                # Use appropriate publishing method based on whether we have a chart
+                if chart_path and hasattr(self.publishing_service, 'publish_tweet_with_media'):
+                    tweet_result = self.publishing_service.publish_tweet_with_media(tweet_content, chart_path)
+                else:
+                    # Fallback to regular tweet if no chart or media method not available
+                    if chart_path:
+                        self.logger.warning("Chart generated but publish_tweet_with_media not available, publishing text-only")
+                    tweet_result = self.publishing_service.publish_tweet(tweet_content)
+                    
                 if not tweet_result or not tweet_result.success:
                     raise Exception(f"Failed to publish tweet: {tweet_result.error}")
-                self.logger.info(f"Step 6/7: Published tweet: {tweet_result.url}")
+                self.logger.info(f"Step 6/8: Published tweet: {tweet_result.url}")
                 
                 # Step 7: Update Notion Page and Database with URLs
                 self.notion_publisher.update_briefing_with_tweet(
@@ -312,18 +369,17 @@ class ContentEngine:
                     website_url=final_website_url,
                     tweet_url=tweet_result.url
                 )
-                self.logger.info("Step 7/7: Updated Notion page and database with final URLs.")
+                tweet_url = tweet_result.url
+                self.logger.info("Step 7/8: Updated Notion page and database with final URLs.")
             else:
                 self.logger.warning("publish_tweet is False. Skipping Twitter post and URL updates.")
                 self.database_service.update_briefing_urls(
                     briefing_id=briefing_id,
                     website_url=final_website_url,
-                    tweet_url="" # Pass an empty string for the tweet_url
+                    tweet_url=""
                 )
 
-            # --- START OF FIX ---
-            # This entire block is now correctly indented to run AFTER the if/else block.
-            # Step 8: Generate and cache the JSON content locally.
+            # Step 8: Generate and cache the JSON content locally
             try:
                 self.logger.info(f"Step 8/8: Generating and caching JSON for briefing ID: {briefing_id}")
                 
@@ -332,7 +388,7 @@ class ContentEngine:
                     briefing_id=briefing_id,
                     notion_page_id=notion_page_id,
                     final_website_url=final_website_url,
-                    tweet_url=tweet_url # This now safely uses the initialized variable
+                    tweet_url=tweet_url
                 )
 
                 if briefing_json:
@@ -343,66 +399,260 @@ class ContentEngine:
 
             except Exception as e:
                 self.logger.error(f"CRITICAL: Failed during local JSON caching step: {e}", exc_info=True)
-            # --- END OF FIX ---
 
         except Exception as e:
             self.logger.error(f"--- ❌ Briefing pipeline failed for '{briefing_key}': {e} ---", exc_info=True)
             await self.telegram_notifier.send_message(f"ALERT: Briefing pipeline for {briefing_key} failed. Error: {e}")
-    
+        
+        finally:
+            # Clean up chart file if it was generated
+            if chart_path and hasattr(self.chart_service, 'cleanup_chart'):
+                try:
+                    self.chart_service.cleanup_chart(chart_path)
+                    self.logger.debug(f"Cleaned up chart file: {chart_path}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to cleanup chart: {e}")
+                    
     async def _generate_briefing_promo_tweet(self, payload: BriefingPayload, briefing_url: str) -> str:
         """
-        Generates a promotional tweet by creating a GPT-powered blurb
-        based on the briefing's Key Market Drivers, with a specific structure.
+        Enhanced promotional tweet with visual sentiment integration and custom AI hooks.
         """
         analysis = payload.market_analysis
-        key_drivers = analysis.key_drivers
-
-        if not key_drivers:
-            # Fallback tweet
-            return f"Today's market briefing is now live! See the full analysis of today's price action.\n\nRead more here:\n{briefing_url}\n\n#MarketBriefing #Investing"
-
-        # Step 1: Generate the AI blurb from the key drivers
-        drivers_str = ", ".join(key_drivers)
-        prompt = f"Based on these key market drivers: '{drivers_str}', write a single, catchy summary sentence for a tweet (under 120 characters)."
-        blurb = await asyncio.to_thread(
-            self.gpt_service.generate_text,
-            prompt,
-            max_tokens=45,
-            temperature=0.8
-        )
-
-        # Step 2: Format the Key Drivers list with emojis
-        section_emoji_map = {
-            'us_futures': '🇺🇸', 'european_futures': '🇪🇺', 'asian_focus': '🌏',
-            'crypto': '🪙', 'fx': '💱', 'rates': '💵', 'volatility': '📉'
-        }
-        formatted_drivers = []
-        for driver in key_drivers[:3]:
-            emoji = '➡️'
-            for section_key, emoji_char in section_emoji_map.items():
-                if section_key.replace('_', ' ').lower() in driver.lower():
-                    emoji = emoji_char
-                    break
-            formatted_drivers.append(f"{emoji} {driver}")
         
-        drivers_text = "\n".join(formatted_drivers)
-        hashtags = "#MarketAnalysis #Investing #Finance"
+        if not analysis:
+            return self._fallback_tweet(briefing_url)
         
-        # --- Step 3: Assemble the final tweet in your desired order ---
-        # 1. Key Drivers
-        # 2. Link
-        # 3. AI Blurb
-        # 4. Hashtags
-        tweet_text = (
-            f"{drivers_text}\n\n"
-            f"Detailed analysis here:\n{briefing_url}\n\n"
-            f"{blurb.strip()}\n\n"
-            f"{hashtags}"
+        # Step 1: Generate custom AI hook based on market conditions
+        custom_hook = await self._generate_custom_hook(analysis, payload.config)
+        
+        # Step 2: Create visual sentiment indicator
+        sentiment_visual = self._create_sentiment_visual(analysis)
+        
+        # Step 3: Format key drivers with performance context
+        key_drivers_formatted = self._format_key_drivers_with_performance(analysis, payload.raw_market_data)
+        
+        # Step 4: Generate market insight from section performance
+        market_insight = self._generate_market_insight(analysis.section_analyses)
+        
+        # Step 5: Create engaging hashtags based on sentiment
+        dynamic_hashtags = self._generate_dynamic_hashtags(analysis.sentiment, payload.config)
+        
+        # Step 6: Assemble the enhanced tweet
+        tweet_text = self._assemble_enhanced_tweet(
+            custom_hook=custom_hook,
+            sentiment_visual=sentiment_visual,
+            briefing_title=payload.config.get('briefing_title', 'Market Briefing'),
+            key_drivers=key_drivers_formatted,
+            market_insight=market_insight,
+            briefing_url=briefing_url,
+            hashtags=dynamic_hashtags
         )
         
         return tweet_text
 
-    # core/content_engine.py
+    async def _generate_custom_hook(self, analysis, config: Dict) -> str:
+        """Generate AI-powered custom opening hook based on market conditions."""
+        
+        # Create context for hook generation
+        market_context = {
+            'sentiment': analysis.sentiment.value,
+            'confidence': analysis.confidence_score,
+            'key_drivers': analysis.key_drivers[:2],  # Top 2 drivers
+            'briefing_period': config.get('briefing_title', ''),
+            'volatility_level': self._assess_volatility_level(analysis.section_analyses)
+        }
+        
+        prompt = f"""
+        Generate a compelling, attention-grabbing opening line for a financial market tweet based on these conditions:
+        
+        Market Sentiment: {market_context['sentiment']} (confidence: {market_context['confidence']:.1f})
+        Period: {market_context['briefing_period']}
+        Key Drivers: {', '.join(market_context['key_drivers'])}
+        Market Volatility: {market_context['volatility_level']}
+        
+        Requirements:
+        - Maximum 60 characters
+        - Create urgency and intrigue
+        - Professional but engaging tone
+        - No generic phrases like "markets are mixed"
+        - Include action words or market-moving implications
+        
+        Examples of good hooks:
+        - "🚨 Critical shift in futures ahead of open"
+        - "⚡ Crypto crash ripples through risk assets"
+        - "🔥 Explosive sector rotation underway"
+        - "⚠️ Fed signals trigger bond market upheaval"
+        """
+        
+        hook = await asyncio.to_thread(
+            self.gpt_service.generate_text,
+            prompt,
+            max_tokens=25,
+            temperature=0.9
+        )
+        
+        return hook.strip()
+
+    def _create_sentiment_visual(self, analysis) -> str:
+        """Create visual sentiment indicator with emojis and formatting."""
+        
+        sentiment_config = {
+            'BULLISH': {
+                'emoji': '🐂',
+                'indicator': '📈',
+                'color_hint': '🟢',
+                'prefix': 'BULLISH'
+            },
+            'BEARISH': {
+                'emoji': '🐻', 
+                'indicator': '📉',
+                'color_hint': '🔴',
+                'prefix': 'BEARISH'
+            },
+            'MIXED': {
+                'emoji': '⚖️',
+                'indicator': '📊',
+                'color_hint': '🟡', 
+                'prefix': 'MIXED'
+            },
+            'NEUTRAL': {
+                'emoji': '😐',
+                'indicator': '➡️',
+                'color_hint': '⚪',
+                'prefix': 'NEUTRAL'
+            }
+        }
+        
+        config = sentiment_config.get(analysis.sentiment.value, sentiment_config['NEUTRAL'])
+        confidence_bars = '█' * min(int(analysis.confidence_score * 5), 5)
+        
+        return f"{config['color_hint']} {config['prefix']} {config['emoji']} {config['indicator']} [{confidence_bars}]"
+
+    def _format_key_drivers_with_performance(self, analysis, raw_market_data: Dict) -> str:
+        """Format key drivers with actual performance context."""
+        
+        if not analysis.key_drivers:
+            return "Mixed signals across markets"
+        
+        # Extract performance numbers from section analyses
+        section_performance = {
+            section.section_name: section.avg_performance 
+            for section in analysis.section_analyses
+        }
+        
+        formatted_drivers = []
+        for driver in analysis.key_drivers[:2]:  # Top 2 drivers
+            # Try to find corresponding performance data
+            performance_text = ""
+            for section_name, performance in section_performance.items():
+                if section_name.replace('_', ' ').lower() in driver.lower():
+                    performance_text = f" ({performance:+.1f}%)"
+                    break
+            
+            # Add appropriate emoji based on content
+            if 'crypto' in driver.lower():
+                emoji = '🪙'
+            elif 'europe' in driver.lower():
+                emoji = '🇪🇺'
+            elif 'us' in driver.lower() or 'futures' in driver.lower():
+                emoji = '🇺🇸'
+            elif 'fx' in driver.lower() or 'dollar' in driver.lower():
+                emoji = '💱'
+            elif 'bond' in driver.lower() or 'yield' in driver.lower():
+                emoji = '💵'
+            else:
+                emoji = '📊'
+            
+            formatted_drivers.append(f"{emoji} {driver}{performance_text}")
+        
+        return '\n'.join(formatted_drivers)
+
+    def _generate_market_insight(self, section_analyses) -> str:
+        """Generate a concise market insight from section performance."""
+        
+        if not section_analyses:
+            return "Markets showing mixed directional signals"
+        
+        # Find most significant movers
+        strongest_section = max(section_analyses, key=lambda x: abs(x.avg_performance))
+        
+        if strongest_section.avg_performance > 1.0:
+            return f"{strongest_section.section_name.replace('_', ' ').title()} surging +{strongest_section.avg_performance:.1f}%"
+        elif strongest_section.avg_performance < -1.0:
+            return f"{strongest_section.section_name.replace('_', ' ').title()} dropping {strongest_section.avg_performance:.1f}%"
+        else:
+            # Look for divergence pattern
+            bullish_count = sum(1 for s in section_analyses if s.section_sentiment == "BULLISH")
+            bearish_count = sum(1 for s in section_analyses if s.section_sentiment == "BEARISH")
+            
+            if bullish_count > bearish_count:
+                return "Risk-on momentum building across sectors"
+            elif bearish_count > bullish_count:
+                return "Defensive positioning emerging"
+            else:
+                return "Cross-asset divergence creating opportunities"
+
+    def _generate_dynamic_hashtags(self, sentiment, config: Dict) -> str:
+        """Generate hashtags based on sentiment and briefing type."""
+        
+        base_tags = "#MarketAnalysis #Investing"
+        
+        sentiment_tags = {
+            'BULLISH': "#BullMarket #RiskOn",
+            'BEARISH': "#BearMarket #RiskOff", 
+            'MIXED': "#MarketRotation #Divergence",
+            'NEUTRAL': "#Consolidation #RangeTrading"
+        }
+        
+        period_tags = {
+            'Morning Briefing': "#PreMarket #MarketOpen",
+            'EU Close Briefing': "#EuropeanClose #GlobalMarkets",
+            'US Close Briefing': "#MarketClose #AfterHours"
+        }
+        
+        sentiment_tag = sentiment_tags.get(sentiment.value, "")
+        period_tag = period_tags.get(config.get('briefing_title', ''), "#Finance")
+        
+        return f"{base_tags} {sentiment_tag} {period_tag}"
+
+    def _assemble_enhanced_tweet(self, custom_hook: str, sentiment_visual: str, briefing_title: str, 
+                            key_drivers: str, market_insight: str, briefing_url: str, hashtags: str) -> str:
+        """Assemble the final enhanced tweet structure."""
+        
+        tweet_structure = (
+            f"{custom_hook}\n\n"
+            f"{sentiment_visual}\n"
+            f"📊 {briefing_title}\n\n"
+            f"{key_drivers}\n\n"
+            f"💡 {market_insight}\n\n"
+            f"🔗 Full analysis: {briefing_url}\n\n"
+            f"{hashtags}"
+        )
+        
+        return tweet_structure
+
+    def _assess_volatility_level(self, section_analyses) -> str:
+        """Assess overall market volatility level."""
+        if not section_analyses:
+            return "low"
+        
+        avg_abs_performance = sum(abs(s.avg_performance) for s in section_analyses) / len(section_analyses)
+        
+        if avg_abs_performance > 2.0:
+            return "high"
+        elif avg_abs_performance > 1.0:
+            return "elevated"
+        else:
+            return "moderate"
+
+    def _fallback_tweet(self, briefing_url: str) -> str:
+        """Fallback tweet when analysis data is unavailable."""
+        return (
+            f"🚨 Latest market briefing is live!\n\n"
+            f"📊 Complete analysis of today's price action\n\n"
+            f"🔗 Read more: {briefing_url}\n\n"
+            f"#MarketAnalysis #Investing #Finance"
+        )
 
     async def _log_content_and_results(
         self, 
@@ -559,6 +809,23 @@ class ContentEngine:
                 "error": str(e),
                 "status": "unhealthy"
             }
+
+    async def _generate_briefing_promo_tweet_with_chart(self, payload: BriefingPayload, briefing_url: str) -> Tuple[str, Optional[str]]:
+        """
+        Enhanced promotional tweet with optional chart generation.
+        Returns (tweet_text, chart_path).
+        """
+        # Generate the text part (your existing method)
+        tweet_text = await self._generate_briefing_promo_tweet(payload, briefing_url)
+        
+        # Optionally generate chart
+        chart_path = await self._generate_chart_for_tweet(payload)
+        
+        # If we have a chart, modify tweet text to reference it
+        if chart_path:
+            tweet_text += "\n\n📊 Chart attached 👇"
+        
+        return tweet_text, chart_path
 
 async def publish_commentary_now(category: Optional[str] = None) -> Dict[str, Any]:
     """
