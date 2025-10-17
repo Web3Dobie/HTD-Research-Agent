@@ -118,3 +118,52 @@ class ContentSimilarityService:
         except Exception as e:
             logger.error(f"❌ Failed to store content history: {e}")
             raise
+
+    def is_content_too_similar_today(
+        self,
+        text: str,
+        similarity_threshold: float = 0.50,
+        content_type: Optional[str] = None
+    ) -> Tuple[bool, Optional[Dict]]:
+        """
+        Check if content is too similar to ANY content posted today.
+        
+        Args:
+            text: Content text to check
+            similarity_threshold: Minimum similarity to consider "too similar" (0.0-1.0)
+            content_type: Optional filter by content type
+            
+        Returns:
+            Tuple of (is_too_similar: bool, similar_content: Dict or None)
+        """
+        from datetime import datetime
+        
+        logger.info(f"🔍 Checking similarity against all content posted today...")
+        
+        # Find similar themes from TODAY (since 00:00)
+        similar_themes = self.semantic_service.find_similar_themes_today(
+            text=text,
+            threshold=similarity_threshold,
+            content_type=content_type
+        )
+        
+        if not similar_themes:
+            logger.info("✅ No similar content found today - content is unique")
+            return False, None
+        
+        # Get the most similar theme
+        most_similar_theme, similarity_score = similar_themes[0]
+        
+        logger.warning(
+            f"⚠️ Found similar content from today: {similarity_score:.0%} match with "
+            f"'{most_similar_theme['theme_text'][:50]}...'"
+        )
+        
+        return True, {
+            'theme_id': most_similar_theme['id'],
+            'content': most_similar_theme['theme_text'],
+            'similarity': similarity_score,
+            'content_type': most_similar_theme['content_type'],
+            'category': most_similar_theme['category'],
+            'posted_at': most_similar_theme['last_used_at']
+        }

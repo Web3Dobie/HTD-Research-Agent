@@ -65,10 +65,14 @@ class HedgeFundNewsHandler(BaseHTTPRequestHandler):
         
         super().__init__(*args, **kwargs)
     
+    # hedgefund_http_server.py - Add these methods to HedgeFundNewsHandler class
+
     def do_GET(self):
+        """Enhanced GET handler with new briefing endpoints"""
+        
         if self.path == '/hedgefund-news-data':
+            # Existing news headlines endpoint (unchanged)
             try:
-                # Get headlines from database
                 headlines = self._get_headlines_from_db()
                 
                 if headlines:
@@ -88,37 +92,54 @@ class HedgeFundNewsHandler(BaseHTTPRequestHandler):
                     
                     logger.info(f"✅ Served {len(headlines)} headlines with {'GPT' if self.gpt_service else 'fallback'} comments")
                 else:
-                    # Return empty but valid response
-                    empty_response = {
-                        "success": True,
-                        "data": [],
-                        "message": "HTD Research is analyzing market conditions",
-                        "lastUpdated": datetime.now().isoformat(),
-                        "categories": ["macro", "equity", "political"]
-                    }
-                    
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.end_headers()
-                    self.wfile.write(json.dumps(empty_response).encode('utf-8'))
-                    
-                    logger.warning("⚠️ No headlines found, returned empty response")
+                    self._send_empty_headlines_response()
                     
             except Exception as e:
                 logger.error(f"❌ Error serving hedge fund news: {e}")
                 self._send_error_response(500, "Database error")
+        
+        elif self.path == '/latest-briefing':
+            # NEW: Latest briefing endpoint for LatestBriefingCard
+            try:
+                briefing_data = self._get_latest_briefing_enhanced()
+                
+                if briefing_data:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps(briefing_data).encode('utf-8'))
+                    
+                    logger.info(f"✅ Served latest briefing: {briefing_data.get('title', 'Unknown')}")
+                else:
+                    self._send_empty_briefing_response()
+                    
+            except Exception as e:
+                logger.error(f"❌ Error serving latest briefing: {e}")
+                self._send_error_response(500, "Briefing data error")
+        
+        elif self.path == '/briefing-summary':
+            # NEW: Compact briefing summary for widget displays
+            try:
+                summary_data = self._get_briefing_summary()
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps(summary_data).encode('utf-8'))
+                
+                logger.info("✅ Served briefing summary")
+                
+            except Exception as e:
+                logger.error(f"❌ Error serving briefing summary: {e}")
+                self._send_error_response(500, "Summary generation error")
                 
         elif self.path == '/health':
+            # Existing health check (unchanged)
             try:
-                # Enhanced health check with service status
                 if self.db_service:
                     headlines_count = self._get_headlines_count()
-                    
-                    # Get rotation info
-                    headlines_30min = len(self._get_headlines_by_timeframe(30, min_score=7, limit=6))
-                    headlines_1hr = len(self._get_headlines_by_timeframe(60, min_score=6, limit=10))
-                    current_rotation = self._get_current_rotation_index(max(headlines_30min, headlines_1hr, 1))
                     
                     health_response = {
                         "status": "healthy",
@@ -129,42 +150,281 @@ class HedgeFundNewsHandler(BaseHTTPRequestHandler):
                             "comment_generation": "institutional_gpt" if self.gpt_service else "static_fallback"
                         },
                         "total_headlines": headlines_count,
-                        "rotation_info": {
-                            "headlines_30min": headlines_30min,
-                            "headlines_1hr": headlines_1hr,
-                            "current_rotation_index": current_rotation,
-                            "rotation_interval": "5 minutes",
-                            "strategy": "30min priority (score≥7), 1hr fallback (score≥6), 5min rotation"
+                        "endpoints": {
+                            "news": "/hedgefund-news-data",
+                            "latest_briefing": "/latest-briefing",
+                            "briefing_summary": "/briefing-summary",
+                            "health": "/health"
                         },
                         "timestamp": datetime.now().isoformat()
                     }
-                    status_code = 200
+                    
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps(health_response).encode('utf-8'))
+                    
+                    logger.info(f"✅ Health check: {health_response['status']}")
                 else:
-                    health_response = {
-                        "status": "degraded", 
-                        "service": "hedgefund-news",
-                        "services": {
-                            "database": "unavailable",
-                            "gpt": "unavailable"
-                        },
-                        "error": "Core services not available",
-                        "timestamp": datetime.now().isoformat()
-                    }
-                    status_code = 503
-                
-                self.send_response(status_code)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps(health_response).encode('utf-8'))
-                
-                logger.info(f"✅ Health check: {health_response['status']}")
-                
+                    self._send_error_response(503, "Database unavailable")
+                    
             except Exception as e:
                 logger.error(f"❌ Health check failed: {e}")
                 self._send_error_response(503, "Health check failed")
         else:
             self._send_error_response(404, "Endpoint not found")
+
+    def _get_latest_briefing_enhanced(self):
+        """Get the latest briefing with enhanced data for LatestBriefingCard - HANDLES BOTH PROPERTY NAMES"""
+        if not self.db_service:
+            logger.warning("Database service not available for latest briefing")
+            return None
+        
+        try:
+            connection = self.db_service.get_connection()
+            if not connection:
+                logger.warning("No database connection available for latest briefing")
+                return None
+            
+            # Get the latest briefing with enhanced JSON content
+            query = """
+            SELECT 
+                id,
+                briefing_type,
+                title,
+                website_url,
+                tweet_url,
+                json_content,
+                created_at
+            FROM hedgefund_agent.briefings 
+            WHERE json_content IS NOT NULL 
+            ORDER BY created_at DESC 
+            LIMIT 1
+            """
+            
+            with connection.cursor() as cursor:
+                cursor.execute(query)
+                result = cursor.fetchone()
+                
+                if result:
+                    briefing_id, briefing_type, title, website_url, tweet_url, json_content, created_at = result
+                    logger.info(f"Found latest briefing: ID={briefing_id}, Type={briefing_type}, Title={title}")
+                    
+                    # Parse the enhanced JSON content - CHECK BOTH PROPERTY NAMES
+                    if json_content and isinstance(json_content, dict):
+                        # Try new property name first, then fallback to old name
+                        enhanced_summary = json_content.get('enhanced_summary', {})
+                        if not enhanced_summary:
+                            enhanced_summary = json_content.get('enhancedSummary', {})
+                            logger.info("Using legacy 'enhancedSummary' property name")
+                        else:
+                            logger.info("Using new 'enhanced_summary' property name")
+                        
+                        logger.debug(f"Enhanced summary keys: {list(enhanced_summary.keys())}")
+                        
+                        # Build response with enhanced data structure
+                        response_data = {
+                            "success": True,
+                            "briefing": {
+                                "id": briefing_id,
+                                "type": briefing_type,
+                                "title": title,
+                                "created_at": created_at.isoformat() if created_at else None,
+                                "urls": {
+                                    "website": website_url,
+                                    "twitter": tweet_url
+                                }
+                            },
+                            "sentiment": enhanced_summary.get('sentiment_visual', {}),
+                            "momentum": enhanced_summary.get('momentum_indicators', {}),
+                            "sectors": enhanced_summary.get('sector_highlights', []),
+                            "insights": enhanced_summary.get('key_insights', []),
+                            "summary": enhanced_summary.get('market_summary_short', ''),
+                            "confidence": enhanced_summary.get('confidence_level', 'moderate'),
+                            "health_score": enhanced_summary.get('market_health_score', 50),
+                            "lastUpdated": datetime.now().isoformat()
+                        }
+                        
+                        logger.info(f"Enhanced briefing data prepared: {len(enhanced_summary)} summary fields")
+                        return response_data
+                    else:
+                        logger.warning("Latest briefing found but no enhanced JSON content")
+                        return self._get_fallback_briefing_data(briefing_id, title, created_at)
+                else:
+                    logger.warning("No briefings with JSON content found in database")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"Failed to get latest briefing: {e}", exc_info=True)
+            return None
+
+
+    def _get_briefing_summary(self):
+        """Get a compact briefing summary for widget displays - HANDLES BOTH PROPERTY NAMES"""
+        if not self.db_service:
+            return self._get_fallback_summary()
+        
+        try:
+            connection = self.db_service.get_connection()
+            if not connection:
+                return self._get_fallback_summary()
+            
+            # FIXED: Separate queries for count and latest briefing
+            with connection.cursor() as cursor:
+                # Get briefings count for today
+                cursor.execute("""
+                    SELECT COUNT(*) as total_briefings
+                    FROM hedgefund_agent.briefings 
+                    WHERE created_at >= NOW() - INTERVAL '24 hours'
+                """)
+                count_result = cursor.fetchone()
+                total_briefings = count_result[0] if count_result else 0
+                
+                # Get latest briefing with JSON content
+                cursor.execute("""
+                    SELECT created_at, json_content
+                    FROM hedgefund_agent.briefings 
+                    WHERE json_content IS NOT NULL 
+                    ORDER BY created_at DESC 
+                    LIMIT 1
+                """)
+                latest_result = cursor.fetchone()
+                
+                if latest_result:
+                    latest_time, json_content = latest_result
+                    
+                    sentiment_info = {"sentiment": "mixed", "emoji": "⚖️", "color": "#f59e0b"}
+                    if json_content and isinstance(json_content, dict):
+                        # CHECK BOTH PROPERTY NAMES - new first, then legacy
+                        enhanced_summary = json_content.get('enhanced_summary', {})
+                        if not enhanced_summary:
+                            enhanced_summary = json_content.get('enhancedSummary', {})
+                            logger.info("Summary endpoint using legacy 'enhancedSummary' property")
+                        else:
+                            logger.info("Summary endpoint using new 'enhanced_summary' property")
+                        
+                        sentiment_visual = enhanced_summary.get('sentiment_visual', {})
+                        if sentiment_visual:
+                            sentiment_info = {
+                                "sentiment": sentiment_visual.get('sentiment', 'mixed'),
+                                "emoji": sentiment_visual.get('emoji', '⚖️'),
+                                "color": sentiment_visual.get('color', '#f59e0b'),
+                                "description": sentiment_visual.get('description', 'Market sentiment mixed')
+                            }
+                            logger.debug(f"Found sentiment data: {sentiment_info['sentiment']}")
+                        else:
+                            logger.warning("No sentiment_visual data found in enhanced summary")
+                    
+                    return {
+                        "success": True,
+                        "briefings_today": total_briefings,
+                        "latest_briefing_time": latest_time.isoformat() if latest_time else None,
+                        "market_sentiment": sentiment_info,
+                        "status": "active",
+                        "lastUpdated": datetime.now().isoformat()
+                    }
+                else:
+                    # No briefings with JSON content found
+                    return {
+                        "success": True,
+                        "briefings_today": total_briefings,
+                        "latest_briefing_time": None,
+                        "market_sentiment": {
+                            "sentiment": "unknown",
+                            "emoji": "🔄",
+                            "color": "#6b7280",
+                            "description": "Market analysis in progress"
+                        },
+                        "status": "processing",
+                        "lastUpdated": datetime.now().isoformat()
+                    }
+                    
+        except Exception as e:
+            logger.error(f"Failed to get briefing summary: {e}")
+            return self._get_fallback_summary()
+
+    def _get_fallback_briefing_data(self, briefing_id, title, created_at):
+        """Fallback briefing data when enhanced JSON is not available"""
+        return {
+            "success": True,
+            "briefing": {
+                "id": briefing_id,
+                "title": title,
+                "created_at": created_at.isoformat() if created_at else None,
+                "urls": {"website": None, "twitter": None}
+            },
+            "sentiment": {
+                "sentiment": "mixed",
+                "emoji": "⚖️",
+                "color": "#f59e0b",
+                "description": "Market analysis in progress"
+            },
+            "momentum": {
+                "momentum_direction": "neutral",
+                "bullish_percentage": 50,
+                "bearish_percentage": 50
+            },
+            "sectors": [],
+            "insights": ["Market analysis in progress"],
+            "summary": "Comprehensive market analysis available soon.",
+            "confidence": "moderate",
+            "health_score": 50,
+            "lastUpdated": datetime.now().isoformat(),
+            "note": "Enhanced data processing in progress"
+        }
+
+    def _get_fallback_summary(self):
+        """Fallback summary when database is unavailable"""
+        return {
+            "success": False,
+            "briefings_today": 0,
+            "latest_briefing_time": None,
+            "market_sentiment": {
+                "sentiment": "unknown",
+                "emoji": "🔄",
+                "color": "#6b7280",
+                "description": "Market data loading"
+            },
+            "status": "loading",
+            "lastUpdated": datetime.now().isoformat(),
+            "error": "Data temporarily unavailable"
+        }
+
+    def _send_empty_briefing_response(self):
+        """Send empty briefing response"""
+        empty_response = {
+            "success": True,
+            "briefing": None,
+            "message": "No recent briefings available",
+            "lastUpdated": datetime.now().isoformat()
+        }
+        
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(empty_response).encode('utf-8'))
+        
+        logger.warning("⚠️ No briefings found, returned empty response")
+
+    def _send_empty_headlines_response(self):
+        """Send empty headlines response (existing method enhanced)"""
+        empty_response = {
+            "success": True,
+            "data": [],
+            "message": "HTD Research is analyzing market conditions",
+            "lastUpdated": datetime.now().isoformat(),
+            "categories": ["macro", "equity", "political"]
+        }
+        
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(empty_response).encode('utf-8'))
+        
+        logger.warning("⚠️ No headlines found, returned empty response")
     
     def _get_headlines_from_db(self):
         """Get headlines with smart rotation and GPT-powered institutional comments"""
@@ -373,22 +633,26 @@ class HedgeFundNewsHandler(BaseHTTPRequestHandler):
         pass
 
 def start_hedgefund_news_server(port=3002):
-    """Start the HTTP server for hedge fund news with GPT-powered comments"""
+    """Start the HTTP server for hedge fund news with GPT-powered comments - ENHANCED LOGGING"""
     try:
         server_address = ('0.0.0.0', port)
         httpd = HTTPServer(server_address, HedgeFundNewsHandler)
         
         logger.info(f"🌐 Starting HTD Research news server on all interfaces, port {port}")
         logger.info(f"   📡 News endpoint: http://0.0.0.0:{port}/hedgefund-news-data")
+        logger.info(f"   📊 Latest briefing: http://0.0.0.0:{port}/latest-briefing")
+        logger.info(f"   📈 Briefing summary: http://0.0.0.0:{port}/briefing-summary")
         logger.info(f"   ❤️ Health check: http://0.0.0.0:{port}/health")
         logger.info(f"   💾 Data source: PostgreSQL database")
         logger.info(f"   🤖 Comments: GPT-powered institutional analysis")
         
         print(f"🌐 HTD Research news server running on all interfaces, port {port}")
-        print(f"   📡 Local: http://localhost:{port}/hedgefund-news-data")
-        print(f"   🌍 External: http://74.241.128.114:{port}/hedgefund-news-data")
+        print(f"   📡 News: http://localhost:{port}/hedgefund-news-data")
+        print(f"   📊 Latest Briefing: http://localhost:{port}/latest-briefing")
+        print(f"   📈 Summary: http://localhost:{port}/briefing-summary")
+        print(f"   🌍 External: http://74.241.128.114:{port}/latest-briefing")
         print(f"   ❤️ Health: http://localhost:{port}/health")
-        print(f"   🤖 GPT Comments: HTD Research institutional analysis")
+        print(f"   🤖 Enhanced Briefing Data: Sentiment, Momentum, Sectors")
         
         httpd.serve_forever()
         

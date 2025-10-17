@@ -167,7 +167,7 @@ class JSONCachingService:
             "tweetUrl": tweet_url,
             "marketSentiment": payload.market_analysis.sentiment.value if payload.market_analysis else "NEUTRAL",
             "content": [block for block in content_blocks if block],  # Filter out None blocks
-            "enhancedSummary": enhanced_summary  # Add enhanced data for LatestBriefingCard
+            "enhanced_summary": enhanced_summary  # FIXED: correct property name
         }
         
         self.logger.info(f"✅ Generated JSON with {len(content_blocks)} content blocks")
@@ -805,6 +805,10 @@ class JSONCachingService:
         
         return layout_blocks
 
+    # ============================================================
+    # ENHANCED SUMMARY METHODS (NEW)
+    # ============================================================
+
     def _build_enhanced_briefing_summary(self, payload: BriefingPayload) -> Dict:
         """Build enhanced summary data for LatestBriefingCard component."""
         
@@ -831,8 +835,8 @@ class JSONCachingService:
             'sentiment_visual': sentiment_visual,
             'momentum_indicators': momentum_data,
             'sector_highlights': sector_movers,
-            'key_insights': analysis.key_drivers[:3],
-            'market_summary_short': analysis.market_summary[:150] + "..." if len(analysis.market_summary) > 150 else analysis.market_summary,
+            'key_insights': analysis.key_drivers[:3] if analysis.key_drivers else [],
+            'market_summary_short': analysis.market_summary[:150] + "..." if len(analysis.market_summary or '') > 150 else analysis.market_summary or '',
             'confidence_level': self._map_confidence_to_level(analysis.confidence_score),
             'market_health_score': self._calculate_market_health_score(analysis.section_analyses)
         }

@@ -12,12 +12,12 @@ from services.semantic_theme_service import SemanticThemeService
 from services.content_similarity_service import ContentSimilarityService
 
 # Notion client for memory
-try:
-    from notion_client import Client
-    NOTION_AVAILABLE = True
-except ImportError:
-    NOTION_AVAILABLE = False
-    logging.warning("notion-client not available, memory features disabled")
+#try:
+    #from notion_client import Client
+    #NOTION_AVAILABLE = True
+#except ImportError:
+    #NOTION_AVAILABLE = False
+    #logging.warning("notion-client not available, memory features disabled")
 
 # Import our services and models
 import sys
@@ -47,21 +47,21 @@ class CommentaryGenerator:
         )
         
         # Initialize Notion memory if available
-        self.notion_client = None
-        self.hedgefund_tweet_db_id = None
+        #self.notion_client = None
+        #self.hedgefund_tweet_db_id = None
         
-        if NOTION_AVAILABLE:
-            try:
-                notion_api_key = os.getenv("NOTION_API_KEY")
-                self.hedgefund_tweet_db_id = os.getenv("HEDGEFUND_TWEET_DB_ID")
+        #if NOTION_AVAILABLE:
+            #try:
+                #notion_api_key = os.getenv("NOTION_API_KEY")
+                #.hedgefund_tweet_db_id = os.getenv("HEDGEFUND_TWEET_DB_ID")
                 
-                if notion_api_key and self.hedgefund_tweet_db_id:
-                    self.notion_client = Client(auth=notion_api_key)
-                    logger.info("✅ Notion memory enabled for content diversity")
-                else:
-                    logger.warning("⚠️ Notion credentials missing, memory disabled")
-            except Exception as e:
-                logger.warning(f"⚠️ Notion memory initialization failed: {e}")
+                #if notion_api_key and self.hedgefund_tweet_db_id:
+                    #self.notion_client = Client(auth=notion_api_key)
+                    #logger.info("✅ Notion memory enabled for content diversity")
+                #else:
+                    #logger.warning("⚠️ Notion credentials missing, memory disabled")
+            #except Exception as e:
+                #logger.warning(f"⚠️ Notion memory initialization failed: {e}")
         
         # Category rotation tracking (fallback only)
         self.last_used_category = None
@@ -89,12 +89,13 @@ class CommentaryGenerator:
         }
         
         # Diversity settings
-        self.max_category_concentration = 0.6  # Max 60% same category
-        self.memory_hours = 8  # Look back 8 hours
-        self.keyword_repeat_limit = 2  # Max keyword repeats
+        self.max_category_concentration = 0.6
+        self.keyword_repeat_limit = 2
     
     async def generate(self, request: Optional[ContentRequest] = None) -> GeneratedContent:
         """Generate commentary content with semantic similarity checking"""
+        MAX_HEADLINE_ATTEMPTS = 10  # Try up to 10 headlines
+        
         try:
             logger.info("🐂 Generating hedge fund commentary with semantic intelligence")
             
@@ -102,184 +103,161 @@ class CommentaryGenerator:
             diversity_analysis = self._analyze_recent_content()
             logger.info(f"📊 Recent categories: {diversity_analysis['categories']}")
             
-            # 2. Get headline for content generation
-            headline = self._get_headline_for_content(request)
-            if not headline:
-                raise Exception("No suitable headline available")
-            
-            # 3. Determine category with diversity logic
-            category = self._determine_category_smart(request, headline, diversity_analysis)
-            logger.info(f"📂 Selected category: {category.value}")
-            
-            # === NEW: SEMANTIC SIMILARITY CHECK ===
-            # 4. Extract semantic theme from headline
-            semantic_theme = self.semantic_theme_service.extract_theme(headline.headline)
-            logger.info(f"🧠 Semantic theme extracted: {semantic_theme[:50]}...")
-            
-            # 5. Check if content is too similar to recent posts
-            is_too_similar, similar_content = self.content_similarity_service.is_content_too_similar(
-                text=headline.headline,
-                hours_back=8,
-                similarity_threshold=0.50
-            )
-            
-            if is_too_similar:
-                logger.warning(f"🚫 Headline too similar to recent content (>{similar_content['similarity']:.0%})")
-                logger.warning(f"   Similar to: {similar_content['content'][:80]}...")
-                raise Exception(
-                    f"Content rejected: {similar_content['similarity']:.0%} similar to recent post. "
-                    "Try again with different headline."
+            # === NEW: RETRY LOOP FOR HEADLINES ===
+            for attempt in range(1, MAX_HEADLINE_ATTEMPTS + 1):
+                logger.info(f"🔄 Headline attempt {attempt}/{MAX_HEADLINE_ATTEMPTS}")
+                
+                # 2. Get headline for content generation
+                headline = self._get_headline_for_content(request)
+                if not headline:
+                    if attempt == MAX_HEADLINE_ATTEMPTS:
+                        raise Exception("No suitable headlines available")
+                    logger.warning(f"⚠️ No headline found, trying again...")
+                    continue
+                
+                logger.info(f"📰 Trying headline: {headline.headline[:60]}...")
+                
+                # 3. Determine category with diversity logic
+                category = self._determine_category_smart(request, headline, diversity_analysis)
+                logger.info(f"📂 Selected category: {category.value}")
+                
+                # === SEMANTIC SIMILARITY CHECK ===
+                # 4. Extract semantic theme from headline
+                semantic_theme = self.semantic_theme_service.extract_theme(headline.headline)
+                logger.info(f"🧠 Semantic theme extracted: {semantic_theme[:50]}...")
+                
+                # 5. Check if content is too similar to today's posts
+                is_too_similar, similar_content = self.content_similarity_service.is_content_too_similar_today(
+                    text=headline.headline,
+                    similarity_threshold=0.50,
+                    content_type="commentary"
+                )
+                
+                if is_too_similar:
+                    logger.warning(f"🚫 Headline too similar to today's content (>{similar_content['similarity']:.0%})")
+                    logger.warning(f"   Similar to: {similar_content['content'][:80]}...")
+                    logger.info(f"⏭️ Skipping to next headline (attempt {attempt}/{MAX_HEADLINE_ATTEMPTS})")
+                    
+                    # Mark headline as used so we don't try it again
+                    self.data_service.mark_headline_used(headline.id, "commentary_rejected")
+                    continue  # Try next headline
+                
+                logger.info("✅ Semantic similarity check passed - content is unique")
+                # === END SEMANTIC CHECK ===
+                
+                # 6. Generate base commentary using GPT
+                prompt = self._build_commentary_prompt(headline, category)
+                base_text = self.gpt_service.generate_tweet(prompt)
+                
+                if not base_text:
+                    raise Exception("GPT generation failed")
+                
+                # 7. Check for keyword diversity and regenerate if needed
+                base_text = self._ensure_keyword_diversity(base_text, prompt, diversity_analysis)
+                
+                # 8. Enrich with market data if requested
+                enriched_text = base_text
+                market_data = []
+                
+                if request and request.include_market_data:
+                    enriched_text, market_data = await self.enrichment_service.enrich_content(base_text)
+                
+                # 9. Add mentions and disclaimer
+                final_text = self._finalize_text(enriched_text)
+                
+                # === SEMANTIC THEME TRACKING ===
+                # 10. Mark headline as used
+                self.data_service.mark_headline_used(headline.id, "commentary")
+                
+                # 11. Track semantic theme
+                self.semantic_theme_service.track_theme(
+                    theme_text=semantic_theme,
+                    full_content=final_text,
+                    content_type="commentary",
+                    category=category.value
+                )
+                logger.info(f"✅ Semantic theme tracked with embedding")
+                # === END SEMANTIC TRACKING ===
+                
+                logger.info(f"✅ Generated diverse commentary: {final_text[:50]}...")
+                
+                return GeneratedContent(
+                    text=final_text,
+                    content_type=ContentType.COMMENTARY,
+                    category=category,
+                    theme=semantic_theme,
+                    market_data=market_data,
+                    headline_used=headline
                 )
             
-            logger.info("✅ Semantic similarity check passed - content is unique")
-            # === END SEMANTIC CHECK ===
-            
-            # 6. Generate base commentary using GPT
-            prompt = self._build_commentary_prompt(headline, category)
-            base_text = self.gpt_service.generate_tweet(prompt)
-            
-            if not base_text:
-                raise Exception("GPT generation failed")
-            
-            # 7. Check for keyword diversity and regenerate if needed
-            base_text = self._ensure_keyword_diversity(base_text, prompt, diversity_analysis)
-            
-            # 8. Enrich with market data if requested
-            enriched_text = base_text
-            market_data = []
-            
-            if request and request.include_market_data:
-                enriched_text, market_data = await self.enrichment_service.enrich_content(base_text)
-            
-            # 9. Add mentions and disclaimer
-            final_text = self._finalize_text(enriched_text)
-            
-            # === NEW: SEMANTIC THEME TRACKING ===
-            # 10. Mark headline as used
-            self.data_service.mark_headline_used(headline.id, "commentary")
-            
-            # 11. Track semantic theme (replaces old track_theme)
-            self.semantic_theme_service.track_theme(
-                theme_text=semantic_theme,
-                full_content=final_text,
-                content_type="commentary",
-                category=category.value
-            )
-            logger.info(f"✅ Semantic theme tracked with embedding")
-            # === END SEMANTIC TRACKING ===
-            
-            logger.info(f"✅ Generated diverse commentary: {final_text[:50]}...")
-            
-            return GeneratedContent(
-                text=final_text,
-                content_type=ContentType.COMMENTARY,
-                category=category,
-                theme=semantic_theme,  # Use semantic theme
-                market_data=market_data,
-                headline_used=headline
-            )
+            # If we exhausted all attempts
+            raise Exception(f"Could not find unique headline after {MAX_HEADLINE_ATTEMPTS} attempts. All headlines were too similar to today's content.")
             
         except Exception as e:
             logger.error(f"❌ Commentary generation failed: {e}")
             raise
     
-    def _analyze_recent_content(self) -> Dict:
-        """Analyze recent posts for diversity metrics using Notion"""
-        if not self.notion_client or not self.hedgefund_tweet_db_id:
-            logger.debug("📊 Notion unavailable, using fallback diversity analysis")
-            return self._fallback_diversity_analysis()
-        
+    def _analyze_recent_content(self) -> dict:
+        """Analyze today's content for diversity tracking."""
         try:
-            # Query recent posts from Notion
-            cutoff_time = datetime.now() - timedelta(hours=self.memory_hours)
-            cutoff_iso = cutoff_time.isoformat()
-            
-            response = self.notion_client.databases.query(
-                database_id=self.hedgefund_tweet_db_id,
-                filter={
-                    "property": "Date",
-                    "date": {"after": cutoff_iso}
-                },
-                sorts=[{"property": "Date", "direction": "descending"}]
-            )
-            
-            # Analyze posts
-            category_counts = defaultdict(int)
-            keyword_counts = defaultdict(int)
-            total_posts = 0
-            
-            for page in response.get('results', []):
-                try:
-                    properties = page.get('properties', {})
+            with self.data_service.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT category, theme_text
+                        FROM hedgefund_agent.semantic_themes
+                        WHERE DATE(created_at) = CURRENT_DATE
+                        AND content_type = 'commentary'
+                        ORDER BY created_at
+                    """)
                     
-                    # Extract category
-                    category = self._extract_notion_select(properties.get('Category'))
-                    if category:
-                        category_counts[category.lower()] += 1
+                    results = cur.fetchall()
                     
-                    # Extract and analyze text for keywords
-                    text = self._extract_notion_rich_text(properties.get('Text'))
-                    if text:
-                        keywords = self._extract_keywords(text)
-                        for keyword in keywords:
-                            keyword_counts[keyword] += 1
+                    # Count categories
+                    categories = {}
+                    keywords = {}
                     
-                    total_posts += 1
+                    for row in results:
+                        category = row[0]
+                        theme_text = row[1]
+                        
+                        if category:
+                            categories[category] = categories.get(category, 0) + 1
+                        
+                        words = theme_text.lower().split()
+                        for word in words:
+                            if len(word) > 4:
+                                keywords[word] = keywords.get(word, 0) + 1
                     
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to parse Notion post: {e}")
-                    continue
-            
-            # Calculate concentration
-            max_category_count = max(category_counts.values()) if category_counts else 0
-            concentration = max_category_count / total_posts if total_posts > 0 else 0
-            
-            # Get recommended categories (least used first)
-            all_categories = ['macro', 'equity', 'political']
-            recommended = sorted(all_categories, key=lambda cat: category_counts.get(cat, 0))
-            
-            analysis = {
-                'total_posts': total_posts,
-                'categories': dict(category_counts),
-                'keywords': dict(keyword_counts),
-                'concentration': concentration,
-                'recommended_categories': recommended,
-                'last_category': None
-            }
-            
-            # Get last category if available
-            if response.get('results'):
-                try:
-                    last_post = response['results'][0]
-                    last_category = self._extract_notion_select(
-                        last_post.get('properties', {}).get('Category')
-                    )
-                    if last_category:
-                        analysis['last_category'] = last_category.lower()
-                except:
-                    pass
-            
-            logger.info(f"📊 Analyzed {total_posts} recent posts via Notion")
-            return analysis
-            
+                    # Calculate total posts
+                    total_posts = len(results)
+                    
+                    # Find least used categories for recommendations
+                    all_categories = ['macro', 'equity', 'political']
+                    category_usage = {cat: categories.get(cat, 0) for cat in all_categories}
+                    recommended_categories = sorted(category_usage.keys(), key=lambda x: category_usage[x])
+                    
+                    logger.info(f"📊 Today's content: {total_posts} posts, {len(categories)} categories")
+                    
+                    return {
+                        "categories": categories,
+                        "keywords": keywords,
+                        "total_posts": total_posts,  # ✅ Added
+                        "recommended_categories": recommended_categories  # ✅ Added
+                    }
+                    
         except Exception as e:
-            logger.warning(f"⚠️ Notion analysis failed: {e}, using fallback")
-            return self._fallback_diversity_analysis()
-    
-    def _fallback_diversity_analysis(self) -> Dict:
-        """Fallback diversity analysis when Notion is unavailable"""
-        return {
-            'total_posts': 0,
-            'categories': {},
-            'keywords': {},
-            'concentration': 0.0,
-            'recommended_categories': ['macro', 'equity', 'political'],
-            'last_category': None
-        }
+            logger.error(f"❌ Error analyzing today's content: {e}")
+            return {
+                "categories": {}, 
+                "keywords": {},
+                "total_posts": 0,  # ✅ Added
+                "recommended_categories": []  # ✅ Added
+            }
     
     def _determine_category_smart(self, request: Optional[ContentRequest], 
                                  headline: Headline, diversity_analysis: Dict) -> ContentCategory:
-        """Smart category determination with diversity logic"""
+        """Smart category selection with diversity awareness.
+        Now uses database diversity analysis instead of Notion."""
         
         # If request specifies category, use it unless severely overused
         if request and request.category:
@@ -391,15 +369,15 @@ class CommentaryGenerator:
         return found_keywords
     
     # Helper methods for Notion data extraction
-    def _extract_notion_select(self, select_prop):
-        if not select_prop or not select_prop.get('select'):
-            return None
-        return select_prop['select']['name']
+    #def _extract_notion_select(self, select_prop):
+        #if not select_prop or not select_prop.get('select'):
+            #return None
+        #return select_prop['select']['name']
     
-    def _extract_notion_rich_text(self, rich_text_prop):
-        if not rich_text_prop or not rich_text_prop.get('rich_text'):
-            return ''
-        return ''.join([item['plain_text'] for item in rich_text_prop['rich_text']])
+    #def _extract_notion_rich_text(self, rich_text_prop):
+        #if not rich_text_prop or not rich_text_prop.get('rich_text'):
+            #return ''
+        #return ''.join([item['plain_text'] for item in rich_text_prop['rich_text']])
     
     # Keep all your existing methods below (unchanged)
     def _get_headline_for_content(self, request: Optional[ContentRequest]) -> Optional[Headline]:

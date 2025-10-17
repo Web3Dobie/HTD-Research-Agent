@@ -254,24 +254,21 @@ class ContentEngine:
             return None
 
     async def _generate_chart_for_tweet(self, payload: BriefingPayload) -> Optional[str]:
-        """Generate chart for tweet if conditions are met."""
+        """Generate chart for tweet - simplified to generate for ALL briefings."""
         try:
             if not payload.market_analysis or not payload.market_analysis.section_analyses:
                 return None
             
-            # Only generate charts for certain briefing types or conditions
-            briefing_type = payload.config.get('briefing_title', '')
-            
-            # Generate chart for morning briefings or when volatility is high
-            should_generate_chart = (
-                'Morning' in briefing_type or 
-                self._assess_volatility_level(payload.market_analysis.section_analyses) in ['high', 'elevated']
-            )
-            
-            if not should_generate_chart:
+            # Require minimum 3 sections for meaningful chart
+            if len(payload.market_analysis.section_analyses) < 3:
+                self.logger.debug(f"Insufficient data for chart: {len(payload.market_analysis.section_analyses)} sections")
                 return None
             
-            # Choose chart type based on data
+            # Generate chart for ALL briefings (removed restrictions)
+            briefing_title = payload.config.get('briefing_title', 'briefing')
+            self.logger.info(f"Generating chart for {briefing_title}")
+            
+            # Choose chart type based on data availability
             if len(payload.market_analysis.section_analyses) >= 4:
                 chart_path = self.chart_service.generate_sentiment_chart(payload.market_analysis)
             else:
@@ -283,10 +280,15 @@ class ContentEngine:
             self.logger.error(f"Failed to generate chart for tweet: {e}")
             return None
 
+    """
+    Updated content engine section for simplified tweet publishing with unified API v2 interface.
+    This replaces the problematic section in your existing content_engine.py
+    """
+
     async def run_briefing_pipeline(self, briefing_key: str = 'morning_briefing', publish_tweet: bool = True, include_charts: bool = True):
         """
         Executes the complete, end-to-end pipeline for generating and publishing a briefing.
-        Added include_charts parameter for chart generation control.
+        Updated to use unified publishing interface.
         """
         self.logger.info(f"--- 🚀 Starting {briefing_key} pipeline (Publish Tweet: {publish_tweet}, Charts: {include_charts}) ---")
         if not self.briefing_generator:
@@ -304,6 +306,7 @@ class ContentEngine:
             notion_result = await self.notion_publisher.publish_briefing(payload, briefing_key)
             if not notion_result or 'page_id' not in notion_result:
                 raise Exception("Failed to publish to Notion or get page_id.")
+                
             notion_page_id = notion_result['page_id']
             self.logger.info(f"Step 2/8: Published to Notion, page_id: {notion_page_id}")
 
@@ -315,13 +318,13 @@ class ContentEngine:
             )
             self.logger.info(f"Step 3/8: Created database record, briefing_id: {briefing_id}")
 
-            # Step 4: Construct the final, public-facing URL
+            # Step 4: Construct the public website URL
             final_website_url = f"https://www.dutchbrat.com/briefings?briefing_id={briefing_id}"
             self.logger.info(f"Step 4/8: Constructed public URL: {final_website_url}")
-            
+
+            # Initialize tweet_url for later use
             tweet_url = ""
-            
-            # Step 5-7: Enhanced tweet publishing with optional charts
+
             if publish_tweet:
                 self.logger.info("publish_tweet is True. Proceeding with enhanced tweet publication.")
                 
@@ -343,17 +346,15 @@ class ContentEngine:
                     chart_path = None
                     self.logger.info("Step 5/8: Generated tweet text (charts disabled)")
 
-                # Step 6: Publish the tweet (with or without media)
-                tweet_content = GeneratedContent(text=tweet_text, content_type=ContentType.BRIEFING, theme="Market Briefing")
+                # Step 6: Publish the tweet using unified interface
+                tweet_content = GeneratedContent(
+                    text=tweet_text, 
+                    content_type=ContentType.BRIEFING, 
+                    theme="Market Briefing"
+                )
                 
-                # Use appropriate publishing method based on whether we have a chart
-                if chart_path and hasattr(self.publishing_service, 'publish_tweet_with_media'):
-                    tweet_result = self.publishing_service.publish_tweet_with_media(tweet_content, chart_path)
-                else:
-                    # Fallback to regular tweet if no chart or media method not available
-                    if chart_path:
-                        self.logger.warning("Chart generated but publish_tweet_with_media not available, publishing text-only")
-                    tweet_result = self.publishing_service.publish_tweet(tweet_content)
+                # ✅ SIMPLIFIED: Use single publish_tweet method with optional image_path
+                tweet_result = self.publishing_service.publish_tweet(tweet_content, image_path=chart_path)
                     
                 if not tweet_result or not tweet_result.success:
                     raise Exception(f"Failed to publish tweet: {tweet_result.error}")
@@ -412,6 +413,7 @@ class ContentEngine:
                     self.logger.debug(f"Cleaned up chart file: {chart_path}")
                 except Exception as e:
                     self.logger.warning(f"Failed to cleanup chart: {e}")
+
                     
     async def _generate_briefing_promo_tweet(self, payload: BriefingPayload, briefing_url: str) -> str:
         """
@@ -529,7 +531,7 @@ class ContentEngine:
         return f"{config['color_hint']} {config['prefix']} {config['emoji']} {config['indicator']} [{confidence_bars}]"
 
     def _format_key_drivers_with_performance(self, analysis, raw_market_data: Dict) -> str:
-        """Format key drivers with actual performance context."""
+        """Format key drivers with actual performance context - FIXED to avoid duplication."""
         
         if not analysis.key_drivers:
             return "Mixed signals across markets"
@@ -542,12 +544,16 @@ class ContentEngine:
         
         formatted_drivers = []
         for driver in analysis.key_drivers[:2]:  # Top 2 drivers
-            # Try to find corresponding performance data
+            # Check if driver already contains percentage - if so, don't add more
+            has_percentage = '(' in driver and '%' in driver
+            
+            # Try to find corresponding performance data only if not already present
             performance_text = ""
-            for section_name, performance in section_performance.items():
-                if section_name.replace('_', ' ').lower() in driver.lower():
-                    performance_text = f" ({performance:+.1f}%)"
-                    break
+            if not has_percentage:
+                for section_name, performance in section_performance.items():
+                    if section_name.replace('_', ' ').lower() in driver.lower():
+                        performance_text = f" ({performance:+.1f}%)"
+                        break
             
             # Add appropriate emoji based on content
             if 'crypto' in driver.lower():
@@ -568,7 +574,7 @@ class ContentEngine:
         return '\n'.join(formatted_drivers)
 
     def _generate_market_insight(self, section_analyses) -> str:
-        """Generate a concise market insight from section performance."""
+        """Generate a concise market insight from section performance - FIXED to avoid redundancy."""
         
         if not section_analyses:
             return "Markets showing mixed directional signals"
@@ -576,12 +582,13 @@ class ContentEngine:
         # Find most significant movers
         strongest_section = max(section_analyses, key=lambda x: abs(x.avg_performance))
         
+        # Generate insights that don't repeat the key drivers
         if strongest_section.avg_performance > 1.0:
-            return f"{strongest_section.section_name.replace('_', ' ').title()} surging +{strongest_section.avg_performance:.1f}%"
+            return f"Momentum building across {strongest_section.section_name.replace('_', ' ').lower()}"
         elif strongest_section.avg_performance < -1.0:
-            return f"{strongest_section.section_name.replace('_', ' ').title()} dropping {strongest_section.avg_performance:.1f}%"
+            return f"Pressure mounting in {strongest_section.section_name.replace('_', ' ').lower()}"
         else:
-            # Look for divergence pattern
+            # Look for divergence pattern instead of repeating numbers
             bullish_count = sum(1 for s in section_analyses if s.section_sentiment == "BULLISH")
             bearish_count = sum(1 for s in section_analyses if s.section_sentiment == "BEARISH")
             
@@ -617,7 +624,20 @@ class ContentEngine:
 
     def _assemble_enhanced_tweet(self, custom_hook: str, sentiment_visual: str, briefing_title: str, 
                             key_drivers: str, market_insight: str, briefing_url: str, hashtags: str) -> str:
-        """Assemble the final enhanced tweet structure."""
+        """Assemble the final enhanced tweet structure - FIXED with stronger CTA."""
+        
+        # Create compelling CTAs based on sentiment and content
+        cta_options = [
+            "📊 See the full breakdown →",
+            "🔍 Dive deeper into the data →", 
+            "⚡ Get the complete analysis →",
+            "📈 Read the full briefing →",
+            "💡 Discover what's driving markets →"
+        ]
+        
+        # Pick CTA based on content or use rotating selection
+        import random
+        cta = random.choice(cta_options)
         
         tweet_structure = (
             f"{custom_hook}\n\n"
@@ -625,7 +645,7 @@ class ContentEngine:
             f"📊 {briefing_title}\n\n"
             f"{key_drivers}\n\n"
             f"💡 {market_insight}\n\n"
-            f"🔗 Full analysis: {briefing_url}\n\n"
+            f"{cta} {briefing_url}\n\n"
             f"{hashtags}"
         )
         

@@ -96,6 +96,42 @@
 
 ---
 
+## Article Generation Integration
+
+### Overview
+The HTD agent automatically generates comprehensive articles alongside Twitter threads, providing expanded institutional analysis for web publication.
+
+### ArticleWriter Service
+**Location:** `services/article_writer.py`
+
+**Features:**
+- Generates markdown articles from thread content
+- Expands analysis beyond Twitter character limits
+- Saves articles to mounted volume for NGINX serving
+- Provides institutional-grade research format
+
+**Integration:**
+- Integrated into `DeepDiveGenerator.generate()` method
+- Articles generated after successful thread creation
+- Article links automatically added to final thread part
+- Graceful degradation if article generation fails
+
+**File Output:**
+- Format: `deep-dive-YYYY-MM-DD-{theme-slug}.md`
+- Location: `/app/articles/` (mounted to `./HTD-Research-Agent/articles/`)
+- Structure: Executive Summary, Market Analysis, Technical Insights, Thread Analysis
+
+**URL Generation:**
+- Public URLs: `https://dutchbrat.com/articles/htd/{article-id}`
+- Automatically included in Twitter threads
+- Accessible via frontend articles page
+
+### Configuration
+- Initialized in `DeepDiveGenerator.__init__()`
+- Mount point: `/app/articles`
+- Error handling: Non-blocking failures
+- Logging: Comprehensive generation tracking
+
 ## APIs/Endpoints
 
 ### Internal Endpoints (Port 3002)

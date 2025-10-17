@@ -17,9 +17,9 @@ class MarketDataEnrichmentService:
     """
     def __init__(self, market_client: MarketClient):
         self.market_client = market_client
-        self.RETRY_ATTEMPTS = 3
+        self.RETRY_ATTEMPTS = 2
         self.RETRY_DELAY_SECONDS = 2.5
-        self.ENRICHMENT_TIMEOUT_SECONDS = 20
+        self.ENRICHMENT_TIMEOUT_SECONDS = 30
 
     async def enrich_content(self, content: Union[str, List[str]]) -> Tuple[Union[str, List[str]], List[MarketData]]:
         """

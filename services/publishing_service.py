@@ -1,11 +1,12 @@
 # services/publishing_service.py
 """
-PublishingService - Clean Twitter posting service with rate limit fix.
-Caches username to avoid repeated get_me() calls.
+PublishingService - Pure Twitter API v2 implementation with media support.
+Scalable, future-proof design with proper error handling and rate limiting.
 """
 
 import logging
 import os
+import mimetypes
 from typing import Optional, List
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,14 +29,14 @@ class TwitterResult:
 
 class PublishingService:
     """
-    Clean Twitter publishing service with rate limit protection.
-    Caches username to avoid repeated API calls.
+    Pure Twitter API v2 publishing service with media support.
+    Scalable design for high-volume content publishing.
     """
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         
-        # Cache username to avoid repeated get_me() calls
+        # Cache username to avoid repeated API calls
         self.username = None
         self.user_id = None
         
@@ -45,16 +46,12 @@ class PublishingService:
         self.access_token = TWITTER_CONFIG['access_token']
         self.access_token_secret = TWITTER_CONFIG['access_token_secret']
         
-        # Initialize Twitter client
+        # Initialize Twitter client (API v2 only)
         self.client = None
         self._initialize_client()
-        self.api = tweepy.API(tweepy.OAuth1UserHandler(
-            self.consumer_key, self.consumer_secret,
-            self.access_token, self.access_token_secret
-        ))
         
     def _initialize_client(self):
-        """Initialize Twitter client with error handling - NO user verification to avoid rate limits"""
+        """Initialize Twitter API v2 client with error handling"""
         try:
             if not all([self.consumer_key, self.consumer_secret, 
                        self.access_token, self.access_token_secret]):
@@ -69,25 +66,74 @@ class PublishingService:
                 wait_on_rate_limit=True
             )
             
-            # Skip user verification to avoid rate limits
-            # We'll use a fallback username and the service will still work for posting
+            # Cache username to avoid rate limits (fallback approach)
             self.username = "Dutch_Brat"  # Your actual username
             self.user_id = "unknown"
-            self.logger.info(f"✅ Twitter client initialized (skipping verification to avoid rate limits)")
+            self.logger.info("✅ Twitter API v2 client initialized")
                 
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize Twitter client: {e}")
             self.client = None
-    
-    def publish_tweet(self, content: GeneratedContent) -> TwitterResult:
+
+    def upload_media_v2(self, image_path: str) -> Optional[str]:
         """
-        Publish a single tweet using cached username.
+        Upload media using Twitter API v2 media upload.
         
         Args:
-            content: GeneratedContent object containing the tweet text and metadata
+            image_path: Path to the image file
             
         Returns:
-            TwitterResult with success status and details
+            media_id string if successful, None if failed
+        """
+        try:
+            if not os.path.exists(image_path):
+                self.logger.error(f"Image file not found: {image_path}")
+                return None
+            
+            # Check file size (Twitter limit is 5MB for images)
+            file_size = os.path.getsize(image_path)
+            if file_size > 5 * 1024 * 1024:  # 5MB
+                self.logger.error(f"Image file too large: {file_size} bytes")
+                return None
+            
+            # Detect media type
+            mime_type, _ = mimetypes.guess_type(image_path)
+            if not mime_type or not mime_type.startswith('image/'):
+                self.logger.error(f"Invalid image file type: {mime_type}")
+                return None
+            
+            # Create OAuth1 handler for media upload (API v2 doesn't support direct media upload yet)
+            auth = tweepy.OAuth1UserHandler(
+                self.consumer_key, self.consumer_secret,
+                self.access_token, self.access_token_secret
+            )
+            api_v1 = tweepy.API(auth)
+            
+            # Upload media using v1.1 endpoint (this is still the standard approach)
+            with open(image_path, 'rb') as image_file:
+                response = api_v1.media_upload(filename=image_path, file=image_file)
+                
+            if hasattr(response, 'media_id'):
+                self.logger.info(f"Successfully uploaded media: {response.media_id}")
+                return str(response.media_id)
+            else:
+                self.logger.error("Media upload response missing media_id")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Failed to upload media: {e}")
+            return None
+
+    def publish_tweet(self, content: GeneratedContent, image_path: str = None) -> TwitterResult:
+        """
+        Publish a tweet with optional media using pure API v2.
+        
+        Args:
+            content: GeneratedContent object with tweet text
+            image_path: Optional path to image file
+            
+        Returns:
+            TwitterResult with success/failure details
         """
         if not self.client:
             return TwitterResult(
@@ -96,8 +142,22 @@ class PublishingService:
             )
         
         try:
-            # Post the tweet
-            response = self.client.create_tweet(text=content.text)
+            # Prepare tweet parameters
+            tweet_params = {
+                'text': content.text
+            }
+            
+            # Upload media if provided
+            if image_path:
+                media_id = self.upload_media_v2(image_path)
+                if media_id:
+                    tweet_params['media_ids'] = [media_id]
+                    self.logger.info(f"Added media to tweet: {media_id}")
+                else:
+                    self.logger.warning("Failed to upload media, posting text-only tweet")
+            
+            # Publish tweet using API v2
+            response = self.client.create_tweet(**tweet_params)
             
             if not response or not response.data:
                 return TwitterResult(
@@ -107,13 +167,13 @@ class PublishingService:
             
             # Extract tweet details
             tweet_id = response.data['id']
-            
-            # Use cached username (NO additional API call!)
             username = self.username or "unknown"
             url = f"https://x.com/{username}/status/{tweet_id}"
             timestamp = datetime.now(timezone.utc).isoformat()
             
             self.logger.info(f"✅ Tweet published successfully: {url}")
+            if image_path and 'media_ids' in tweet_params:
+                self.logger.info(f"📊 Tweet includes media attachment")
             
             return TwitterResult(
                 success=True,
@@ -144,7 +204,7 @@ class PublishingService:
 
     def publish_thread(self, content: GeneratedContent) -> TwitterResult:
         """
-        Publish a multi-part thread to Twitter.
+        Publish a multi-part thread to Twitter using API v2.
         
         Args:
             content: GeneratedContent with parts array for thread
@@ -167,11 +227,13 @@ class PublishingService:
             
             for i, part in enumerate(content.parts):
                 try:
+                    # Prepare tweet parameters
+                    tweet_params = {'text': part}
+                    if reply_to_id:
+                        tweet_params['in_reply_to_tweet_id'] = reply_to_id
+                    
                     # Post each part as a reply to the previous
-                    response = self.client.create_tweet(
-                        text=part,
-                        in_reply_to_tweet_id=reply_to_id
-                    )
+                    response = self.client.create_tweet(**tweet_params)
                     
                     thread_tweets.append(response)
                     reply_to_id = response.data['id']  # Next tweet replies to this one
@@ -192,7 +254,8 @@ class PublishingService:
             
             # Return result based on first tweet (main thread)
             main_tweet = thread_tweets[0]
-            tweet_url = f"https://twitter.com/{self.username}/status/{main_tweet.data['id']}"
+            username = self.username or "unknown"
+            tweet_url = f"https://x.com/{username}/status/{main_tweet.data['id']}"
             
             self.logger.info(f"🎉 Thread published successfully: {tweet_url}")
             
@@ -206,11 +269,10 @@ class PublishingService:
         except Exception as e:
             self.logger.error(f"❌ Failed to publish thread: {e}")
             return TwitterResult(success=False, error=str(e))
-    
+
     def publish_text(self, text: str) -> TwitterResult:
         """
         Convenience method to publish raw text as a tweet.
-        Useful for simple testing or direct posting.
         
         Args:
             text: The tweet text to publish
@@ -218,7 +280,6 @@ class PublishingService:
         Returns:
             TwitterResult with success status and details
         """
-        # Create a minimal GeneratedContent object
         from core.models import GeneratedContent, ContentType
         
         content = GeneratedContent(
@@ -230,11 +291,10 @@ class PublishingService:
         )
         
         return self.publish_tweet(content)
-    
+
     def get_client_status(self) -> dict:
         """
         Get the status of the Twitter client for monitoring.
-        Uses cached data to avoid additional API calls.
         
         Returns:
             Dict with client status information
@@ -246,163 +306,24 @@ class PublishingService:
                 "credentials_configured": bool(all([
                     self.consumer_key, self.consumer_secret,
                     self.access_token, self.access_token_secret
-                ]))
+                ])),
+                "api_version": "v2"
             }
         
-        # Use cached data instead of making API call
-        if self.username and self.username != "unknown":
-            return {
-                "status": "connected",
-                "username": self.username,
-                "user_id": self.user_id,
-                "last_check": "cached",
-                "note": "Using cached credentials to avoid rate limits"
-            }
-        else:
-            return {
-                "status": "unknown",
-                "error": "Could not verify user during initialization",
-                "note": "Service may still work for posting"
-            }
+        return {
+            "status": "connected",
+            "username": self.username,
+            "user_id": self.user_id,
+            "last_check": "cached",
+            "api_version": "v2",
+            "note": "Using cached credentials to avoid rate limits"
+        }
 
+    # Legacy method aliases for backward compatibility
     def upload_media(self, image_path: str) -> Optional[str]:
-        """
-        Upload media to Twitter and return media_id.
-        
-        Args:
-            image_path: Path to the image file
-            
-        Returns:
-            media_id string if successful, None if failed
-        """
-        try:
-            if not os.path.exists(image_path):
-                self.logger.error(f"Image file not found: {image_path}")
-                return None
-            
-            # Check file size (Twitter limit is 5MB for images)
-            file_size = os.path.getsize(image_path)
-            if file_size > 5 * 1024 * 1024:  # 5MB
-                self.logger.error(f"Image file too large: {file_size} bytes")
-                return None
-            
-            # Upload media using Twitter API v2
-            with open(image_path, 'rb') as image_file:
-                response = self.api.media_upload(filename=image_path, file=image_file)
-                
-            if hasattr(response, 'media_id'):
-                self.logger.info(f"Successfully uploaded media: {response.media_id}")
-                return str(response.media_id)
-            else:
-                self.logger.error("Media upload response missing media_id")
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"Failed to upload media: {e}")
-            return None
+        """Legacy alias for upload_media_v2"""
+        return self.upload_media_v2(image_path)
     
-    def publish_tweet_with_media(self, content: GeneratedContent, image_path: str = None) -> 'TwitterResult':
-        """
-        Publish tweet with optional media attachment.
-        
-        Args:
-            content: GeneratedContent object with tweet text
-            image_path: Optional path to image file
-            
-        Returns:
-            TwitterResult with success/failure details
-        """
-        try:
-            media_ids = []
-            
-            # Upload media if provided
-            if image_path:
-                media_id = self.upload_media(image_path)
-                if media_id:
-                    media_ids.append(media_id)
-                else:
-                    self.logger.warning("Failed to upload media, posting text-only tweet")
-            
-            # Prepare tweet parameters
-            tweet_params = {
-                'text': content.text
-            }
-            
-            if media_ids:
-                tweet_params['media'] = {'media_ids': media_ids}
-            
-            # Publish tweet
-            response = self.client.create_tweet(**tweet_params)
-            
-            if response and response.data:
-                tweet_id = response.data['id']
-                tweet_url = f"https://twitter.com/user/status/{tweet_id}"
-                
-                result = TwitterResult(
-                    success=True,
-                    tweet_id=tweet_id,
-                    url=tweet_url,
-                    timestamp=datetime.now(timezone.utc),
-                    error=None
-                )
-                
-                self.logger.info(f"✅ Tweet published successfully: {tweet_url}")
-                if media_ids:
-                    self.logger.info(f"📊 Tweet includes media: {len(media_ids)} attachment(s)")
-                
-                return result
-            else:
-                error_msg = "Twitter API returned empty response"
-                self.logger.error(f"❌ {error_msg}")
-                return TwitterResult(
-                    success=False,
-                    tweet_id=None,
-                    url=None,
-                    timestamp=datetime.now(timezone.utc),
-                    error=error_msg
-                )
-                
-        except Exception as e:
-            error_msg = f"Failed to publish tweet with media: {e}"
-            self.logger.error(f"❌ {error_msg}")
-            return TwitterResult(
-                success=False,
-                tweet_id=None,
-                url=None,
-                timestamp=datetime.now(timezone.utc),
-                error=error_msg
-            )
-
-# Convenience function for easy testing
-def quick_tweet(text: str) -> TwitterResult:
-    """
-    Quick function to post a tweet.
-    Useful for testing or simple posting.
-    
-    Args:
-        text: The tweet text to publish
-        
-    Returns:
-        TwitterResult with success status and details
-    """
-    service = PublishingService()
-    return service.publish_text(text)
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    def test_publishing_service():
-        """Test the publishing service"""
-        print("🧪 Testing PublishingService...")
-        
-        # Initialize service
-        service = PublishingService()
-        
-        # Check client status
-        status = service.get_client_status()
-        print(f"Client Status: {status}")
-        
-        print("✅ PublishingService test completed")
-    
-    # Run the test
-    test_publishing_service()
+    def publish_tweet_with_media(self, content: GeneratedContent, image_path: str = None) -> TwitterResult:
+        """Legacy alias for publish_tweet with media"""
+        return self.publish_tweet(content, image_path)

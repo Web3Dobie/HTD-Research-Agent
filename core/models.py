@@ -58,6 +58,8 @@ class GeneratedContent:
     headline_used: Optional[Headline] = None
     parts: List[str] = field(default_factory=list)  # For threads
     created_at: datetime = field(default_factory=datetime.now)
+    article_id: Optional[str] = None
+    article_url: Optional[str] = None
 
 @dataclass
 class ContentRequest:

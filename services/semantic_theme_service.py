@@ -271,3 +271,85 @@ class SemanticThemeService:
         similar_themes.sort(key=lambda x: x[1], reverse=True)
         
         return similar_themes
+
+    def find_similar_themes_today(
+        self,
+        text: str,
+        threshold: float = 0.5,
+        content_type: Optional[str] = None
+    ) -> List[Tuple[Dict, float]]:
+        """
+        Find themes similar to the given text from today only (since 00:00).
+        
+        Args:
+            text: Text to compare against today's themes
+            threshold: Minimum similarity threshold (0.0 to 1.0)
+            content_type: Optional filter by content type
+            
+        Returns:
+            List of (theme_dict, similarity_score) tuples above threshold
+        """
+        # Get embedding for input text
+        input_embedding = self.get_embedding(text)
+        
+        # Get all themes from today
+        try:
+            with self.db.get_connection() as conn:
+                with conn.cursor() as cur:
+                    if content_type:
+                        cur.execute("""
+                            SELECT id, theme_text, content_type, category, 
+                                embedding_vector, last_used_at
+                            FROM hedgefund_agent.semantic_themes
+                            WHERE DATE(last_used_at) = CURRENT_DATE
+                            AND content_type = %s
+                            ORDER BY last_used_at DESC
+                        """, (content_type,))
+                    else:
+                        cur.execute("""
+                            SELECT id, theme_text, content_type, category,
+                                embedding_vector, last_used_at
+                            FROM hedgefund_agent.semantic_themes
+                            WHERE DATE(last_used_at) = CURRENT_DATE
+                            ORDER BY last_used_at DESC
+                        """)
+                    
+                    rows = cur.fetchall()
+                    
+                    if not rows:
+                        return []
+                    
+                    # Build theme objects
+                    themes = []
+                    for row in rows:
+                        themes.append({
+                            'id': row[0],
+                            'theme_text': row[1],
+                            'content_type': row[2],
+                            'category': row[3],
+                            'embedding': np.array(row[4]),  # Convert JSONB to numpy
+                            'last_used_at': row[5]
+                        })
+                    
+        except Exception as e:
+            logger.error(f"❌ Failed to get today's themes: {e}")
+            return []
+        
+        if not themes:
+            return []
+        
+        # Calculate similarities
+        similar_themes = []
+        for theme in themes:
+            similarity = cosine_similarity(
+                input_embedding.reshape(1, -1),
+                theme['embedding'].reshape(1, -1)
+            )[0][0]
+            
+            if similarity >= threshold:
+                similar_themes.append((theme, float(similarity)))
+        
+        # Sort by similarity descending
+        similar_themes.sort(key=lambda x: x[1], reverse=True)
+        
+        return similar_themes
