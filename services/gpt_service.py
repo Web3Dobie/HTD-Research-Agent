@@ -37,6 +37,8 @@ class GPTService:
             api_version=AZURE_API_VERSION,
             azure_endpoint=f"https://{AZURE_RESOURCE_NAME}.openai.azure.com/",
         )
+        # In gpt_service.py initialization
+        self.max_tokens = 8000  # Or even higher if your deployment supports it
         
         logger.info("🤖 GPT Service initialized with Azure OpenAI")
     
@@ -279,3 +281,41 @@ class GPTService:
         }
         
         return fallbacks.get(category, fallbacks['general'])
+
+    def generate_educational_article(self, headline: str, summary: str = None, market_context: dict = None) -> str:
+        """Generate comprehensive educational deep-dive article"""
+        
+        context = f"Headline: {headline}"
+        if summary:
+            context += f"\nSummary: {summary}"
+        
+        prompt = f"""Write a comprehensive educational article about this financial development:
+
+    {context}
+
+    Write 2500-3000 words in a flowing, journalistic style. Structure as:
+
+    1. Executive Summary - What happened and why it matters
+    2. Background & Context - Industry/company history, key players, previous developments
+    3. What Actually Happened - Detailed explanation in simple terms
+    4. Why This Matters - Impact on consumers, industry, broader economy
+    5. The Bigger Picture - How this fits larger trends, future implications
+    6. Investment Analysis - Professional perspective on opportunities and risks
+    7. Key Takeaways - Main lessons for readers
+
+    CRITICAL REQUIREMENTS:
+    - Write in complete, flowing paragraphs throughout
+    - Use a conversational but authoritative tone like a knowledgeable teacher
+    - Explain complex concepts with analogies and examples
+    - NO bullet points, NO word counts, NO structural annotations
+    - Write the complete article without meta-commentary
+    - Focus on education and genuine insight
+    - Make readers feel they've learned something valuable
+
+    Begin writing the article now:"""
+
+        return self.generate_text(
+            prompt,
+            max_tokens=4000,  # Reduced but more realistic for quality output
+            temperature=0.7
+        )

@@ -19,9 +19,10 @@ class ArticleWriter:
     Follows the Hunter-Agent pattern with markdown format.
     """
     
-    def __init__(self, articles_path: str = "/app/articles"):
+    def __init__(self, articles_path: str = "/app/htd-articles", gpt_service=None):
         self.logger = logging.getLogger(__name__)
         self.articles_path = Path(articles_path)
+        self.gpt_service = gpt_service
         
         # Ensure articles directory exists
         self.articles_path.mkdir(parents=True, exist_ok=True)
@@ -65,54 +66,31 @@ class ArticleWriter:
             raise
     
     async def _generate_article_markdown(self, content: GeneratedContent, research_data: dict = None) -> str:
-        """
-        Generate expanded markdown article from thread content.
-        """
-        # Create article sections from thread parts
-        thread_analysis = self._analyze_thread_content(content)
+        """Generate educational deep-dive article using GPT"""
         
-        # Generate markdown content
-        markdown_content = f"""# HTD Research - {content.theme}
+        # Use async wrapper for synchronous GPT service
+        educational_content = await asyncio.to_thread(
+            self.gpt_service.generate_educational_article,
+            headline=content.headline_used.headline if content.headline_used else content.theme,
+            summary=content.headline_used.summary if content.headline_used else None,
+            market_context=research_data
+        )
+        
+        # Create full article with metadata
+        markdown_content = f"""# {content.theme}
 
-**Published:** {datetime.now().strftime('%B %d, %Y')}  
-**Author:** HTD Research  
-**Category:** Deep Dive Analysis  
-**Market Data:** {len(content.market_data)} instruments analyzed
+    **Published:** {datetime.now().strftime('%B %d, %Y')}  
+    **Author:** HTD Research  
+    **Category:** Deep Dive Analysis  
 
-## Executive Summary
+    {educational_content}
 
-{thread_analysis['summary']}
+    {self._generate_market_data_section(content.market_data)}
 
-## Market Analysis
+    ---
 
-{thread_analysis['market_section']}
-
-## Technical Insights
-
-{thread_analysis['technical_section']}
-
-{self._generate_market_data_section(content.market_data)}
-
-## Thread Analysis
-
-This analysis was also published as a Twitter thread for real-time market commentary:
-
-{self._format_thread_content(content.parts)}
-
-## Research Methodology
-
-This analysis is based on:
-- Real-time market data from multiple sources
-- Technical indicators and price action analysis  
-- News sentiment analysis from institutional sources
-- Cross-asset correlation studies
-
----
-
-*HTD Research provides institutional-grade market analysis combining quantitative data with qualitative insights. This analysis is for informational purposes only and does not constitute investment advice.*
-
-**Risk Disclaimer:** Market analysis involves substantial risk. Past performance does not guarantee future results.
-"""
+    *HTD Research provides educational market analysis for informational purposes only.*
+    """
         
         return markdown_content
     
@@ -196,12 +174,12 @@ Current volatility patterns suggest:
             return ""
         
         data_table = "## Market Data Summary\n\n"
-        data_table += "| Instrument | Price | Change | Analysis |\n"
-        data_table += "|------------|-------|--------|----------|\n"
+        data_table += "| Instrument | Price | Change |\n"
+        data_table += "|------------|-------|--------|\n"
         
         for data in market_data:
             change_direction = "📈" if data.change_percent > 0 else "📉"
-            data_table += f"| {data.ticker} | ${data.price:.2f} | {data.change_percent:+.2f}% {change_direction} | Key level interaction |\n"
+            data_table += f"| {data.ticker} | ${data.price:.2f} | {data.change_percent:+.2f}% {change_direction} |\n"
         
         data_table += "\n*Market data as of article publication time.*\n\n"
         
@@ -239,7 +217,7 @@ Current volatility patterns suggest:
         """
         Generate the public URL for an article.
         """
-        return f"https://dutchbrat.com/articles/htd/{article_id}"
+        return f"https://dutchbrat.com/articles?{article_id}"
     
     def list_articles(self, limit: int = 10) -> list:
         """

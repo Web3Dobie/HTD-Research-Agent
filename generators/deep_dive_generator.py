@@ -33,7 +33,10 @@ class DeepDiveGenerator:
         )
 
         try:
-            self.article_writer = ArticleWriter("/app/articles")
+            self.article_writer = ArticleWriter(
+                articles_path="/app/htd-articles",
+                gpt_service=self.gpt_service  # Pass it as parameter
+            )
             logger.info("✅ ArticleWriter initialized successfully")
         except Exception as e:
             logger.error(f"❌ Failed to initialize ArticleWriter: {e}")
@@ -219,13 +222,16 @@ class DeepDiveGenerator:
             raise
 
     def _get_headline_for_content(self, request: Optional[ContentRequest]) -> Optional[Headline]:
-        """Get top scoring unused headline for deep dive (FIXED: use new method)"""
+        """Get top scoring headline for deep dive, allowing reuse"""
         if request and request.specific_headline:
             return request.specific_headline
             
-        # Get top scoring unused headline with min_score=9 for deep dives
-        return self.data_service.get_top_unused_headline_today(min_score=9)
-
+        # Allow reuse of headlines for deep dive content
+        return self.data_service.get_top_unused_headline_today(
+            min_score=9, 
+            ignore_usage=True
+        )
+        
     def _build_deep_dive_prompt(self, headline: Headline, category: ContentCategory) -> str:
         """Builds a GPT prompt for a deep dive thread, adapted from old script."""
         context = f"Headline: {headline.headline.strip()}\n"
